@@ -10,7 +10,9 @@
       },
       "sdkconfig_append": [
         "CONFIG_LCD_ST7789_240X240=y",
-        "CONFIG_SPIRAM_TRY_ALLOCATE_WIFI_LWIP=y"
+        "CONFIG_SPIRAM_TRY_ALLOCATE_WIFI_LWIP=y",
+        "CONFIG_ESP_WIFI_TX_BUFFER_TYPE=1",
+        "CONFIG_ESP_WIFI_DYNAMIC_TX_BUFFER_NUM=48"
       ]
     }
   ]
