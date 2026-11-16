@@ -1069,8 +1069,17 @@ void LcdDisplay::SetPreviewImage(std::unique_ptr<LvglImage> image) {
     auto img_dsc = preview_image_cached_->image_dsc();
     lv_image_set_src(preview_image_, img_dsc);
     if (img_dsc->header.w > 0 && img_dsc->header.h > 0) {
-        // zoom factor 0.5
-        lv_image_set_scale(preview_image_, 128 * width_ / img_dsc->header.w);
+        // 按屏幕自适应缩放（原来写死 128=50%，VGA 640x480 只显示 120px 宽，太小）
+        lv_coord_t zoom_w = 256 * width_ / img_dsc->header.w;
+        lv_coord_t zoom_h = 256 * height_ / img_dsc->header.h;
+        lv_coord_t zoom = (zoom_w < zoom_h) ? zoom_w : zoom_h;
+        if (zoom > 256) {
+            zoom = 256;  // 小图不放大，避免糊
+        }
+        ESP_LOGI(TAG, "Preview image %dx%d -> zoom %d/256 (screen %dx%d)",
+                 (int)img_dsc->header.w, (int)img_dsc->header.h, (int)zoom,
+                 (int)width_, (int)height_);
+        lv_image_set_scale(preview_image_, zoom);
     }
 
     // Hide emoji_box_
