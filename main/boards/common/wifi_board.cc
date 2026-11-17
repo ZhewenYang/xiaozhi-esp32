@@ -280,20 +280,11 @@ std::string WifiBoard::GetBoardJson() {
 }
 
 void WifiBoard::SetPowerSaveLevel(PowerSaveLevel level) {
-    WifiPowerSaveLevel wifi_level;
-    switch (level) {
-        case PowerSaveLevel::LOW_POWER:
-            wifi_level = WifiPowerSaveLevel::LOW_POWER;
-            break;
-        case PowerSaveLevel::BALANCED:
-            wifi_level = WifiPowerSaveLevel::BALANCED;
-            break;
-        case PowerSaveLevel::PERFORMANCE:
-        default:
-            wifi_level = WifiPowerSaveLevel::PERFORMANCE;
-            break;
-    }
-    WifiManager::GetInstance().SetPowerSaveLevel(wifi_level);
+    // 桌面插电设备：忽略调用方请求的省电等级，常驻 WIFI_PS_NONE。
+    // 原实现空闲时用 LOW_POWER = WIFI_PS_MAX_MODEM，会让 ping 出现 1 秒级尖峰、
+    // 上行音频帧被推迟（表现为"叫醒慢/应答慢"）。插电不需要省电，直接关掉。
+    (void)level;
+    WifiManager::GetInstance().SetPowerSaveLevel(WifiPowerSaveLevel::PERFORMANCE);
 }
 
 std::string WifiBoard::GetDeviceStatusJson() {
