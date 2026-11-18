@@ -29,8 +29,16 @@ private:
     uint8_t* encode_buf_ = nullptr;  // Buffer for JPEG encoding (with optional byte swap)
     size_t encode_buf_size_ = 0;
 
+    // esp32-camera#869: on ESP32-S3 the XCLK is never stopped once started.
+    // Keep the driver object alive (MCP tool registration needs it) but gate
+    // the 20MHz clock off while idle, and only turn it on for a capture.
+    camera_config_t config_{};
+    bool xclk_gated_ = false;
+    void GateXclkOff();
+    bool CaptureInternal();
+
 public:
-    Esp32Camera(const camera_config_t& config);
+    Esp32Camera(const camera_config_t& config, bool enable_xclk_gating = false);
     ~Esp32Camera();
 
     virtual void SetExplainUrl(const std::string& url, const std::string& token) override;
