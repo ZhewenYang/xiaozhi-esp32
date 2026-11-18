@@ -9,6 +9,7 @@
 #include <esp_pthread.h>
 #include <esp_timer.h>
 #include <algorithm>
+#include <chrono>
 #include <cstring>
 #include <iterator>
 #include <mutex>
@@ -632,6 +633,43 @@ void McpServer::DoToolCall(int id, const std::string& tool_name, const cJSON* to
             // Serialise rapid consecutive photo requests: two captures must
             // never touch the sensor / XCLK at the same time.
             std::lock_guard<std::mutex> guard(camera_worker_mutex);
+
+            // Do not open the 20MHz XCLK window while speech is still being
+            // received or played. The previous photo's explanation may still
+            // be streaming when a rapid consecutive capture request arrives;
+            // overlapping that window with UDP audio causes permanent gaps.
+            // Waiting here blocks only the camera worker, never the main loop.
+            constexpr int64_t kPlaybackWaitTimeoutUs = 45 * 1000000LL;
+            int64_t playback_wait_start_us = 0;
+            while (true) {
+                DeviceState state = app.GetDeviceState();
+                bool playback_idle = app.GetAudioService().IsPlaybackIdle();
+                bool playback_active = state == kDeviceStateSpeaking ||
+                                       state == kDeviceStateNotifying || !playback_idle;
+                if (!playback_active) {
+                    break;
+                }
+                int64_t now_us = esp_timer_get_time();
+                if (playback_wait_start_us == 0) {
+                    playback_wait_start_us = now_us;
+                    ESP_LOGI(TAG,
+                             "[CAM-WAIT] defer capture until playback drains (state=%d, idle=%d)",
+                             (int)state, (int)playback_idle);
+                } else if (now_us - playback_wait_start_us > kPlaybackWaitTimeoutUs) {
+                    ESP_LOGW(TAG, "[CAM-WAIT] playback did not finish within 45s");
+                    app.Schedule([this, id, response_sender = std::move(response_sender)]() mutable {
+                        ReplyError(id, -32603, "Timed out waiting for audio playback to finish",
+                                   response_sender);
+                    });
+                    return;
+                }
+                std::this_thread::sleep_for(std::chrono::milliseconds(50));
+            }
+            if (playback_wait_start_us != 0) {
+                ESP_LOGI(TAG, "[CAM-WAIT] playback drained after %lld ms; capture allowed",
+                         (long long)((esp_timer_get_time() - playback_wait_start_us) / 1000));
+            }
+
             const int64_t start_us = esp_timer_get_time();
             auto result = tool->Call(arguments);
             ESP_LOGI(TAG, "[ASYNC] camera worker finished in %lld ms",

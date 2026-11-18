@@ -1000,6 +1000,10 @@ void Application::ContinueWakeWordInvoke(const std::string& wake_word) {
 
 void Application::HandleStateChangedEvent() {
     DeviceState new_state = state_machine_.GetState();
+    // A TTS/notification session can temporarily receive no packets during
+    // network jitter. Keep the amplifier alive until the session actually ends.
+    audio_service_.SetPlaybackSessionActive(new_state == kDeviceStateSpeaking ||
+                                            new_state == kDeviceStateNotifying);
     clock_ticks_ = 0;
     // Any state change invalidates a pending deferred listening start;
     // the Listening case below re-arms it when needed.

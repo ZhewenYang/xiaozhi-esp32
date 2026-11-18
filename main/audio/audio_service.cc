@@ -790,6 +790,13 @@ bool AudioService::IsIdle() {
     return audio_encode_queue_.empty() && IsPlaybackDrainedLocked() && audio_testing_queue_.empty();
 }
 
+void AudioService::SetPlaybackSessionActive(bool active) {
+    bool previous = playback_session_active_.exchange(active);
+    if (previous != active) {
+        ESP_LOGI(TAG, "[POWER] playback session %s", active ? "active" : "inactive");
+    }
+}
+
 bool AudioService::IsPlaybackIdle() {
     std::lock_guard<std::mutex> lock(audio_queue_mutex_);
     return IsPlaybackDrainedLocked();
@@ -841,9 +848,15 @@ void AudioService::CheckAndUpdateAudioPowerState() {
         // input task instead of closing the codec from the esp_timer task.
         xEventGroupSetBits(event_group_, AS_EVENT_AUDIO_INPUT_STOP_REQUEST);
     }
-    if (output_elapsed > AUDIO_POWER_TIMEOUT_MS && codec_->output_enabled()) {
+    if (output_elapsed > AUDIO_POWER_TIMEOUT_MS && codec_->output_enabled() &&
+        !playback_session_active_.load()) {
+        // Never mute an active TTS/notification session during a network gap.
+        // Once the session ends, last_output_time_ still has to age a full
+        // timeout before we get here, so buffered audio has long drained.
+        // Do not take audio_queue_mutex_ from this esp_timer callback.
         // Keep TX clock when duplex RX is active; otherwise RX may stall on some boards.
         if (!(codec_->duplex() && codec_->input_enabled())) {
+            ESP_LOGI(TAG, "[POWER] output disabled after playback idle timeout");
             codec_->EnableOutput(false);
         }
     }

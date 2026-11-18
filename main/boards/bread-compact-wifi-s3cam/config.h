@@ -53,6 +53,11 @@
 #define CAMERA_PIN_RESET GPIO_NUM_NC
 #define XCLK_FREQ_HZ 20000000
 
+// The 20MHz XCLK on GPIO15 couples into Wi-Fi and drops downlink UDP Opus
+// packets (esp32-camera #869). Firmware keeps this clock gated except during
+// capture, defers a capture until TTS playback has drained, and keeps the
+// amplifier enabled for the whole speaking session. Never leave XCLK running
+// while audio is being streamed.
 
 #define DISPLAY_BACKLIGHT_PIN GPIO_NUM_38
 #define DISPLAY_MOSI_PIN      GPIO_NUM_20
