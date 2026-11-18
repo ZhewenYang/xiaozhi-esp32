@@ -45,7 +45,10 @@
 #define AUDIO_TESTING_MAX_DURATION_MS 10000
 #define MAX_TIMESTAMPS_IN_QUEUE 3
 
-#define AUDIO_POWER_TIMEOUT_MS 15000
+// A camera capture briefly stalls downlink audio while the 20MHz XCLK is on.
+// Keep the amplifier powered long enough that a short gap in the playback
+// queue can never mute the device in the middle of a TTS sentence.
+#define AUDIO_POWER_TIMEOUT_MS 30000
 #define AUDIO_POWER_CHECK_INTERVAL_MS 1000
 
 #define AS_EVENT_AUDIO_TESTING_RUNNING (1 << 0)
