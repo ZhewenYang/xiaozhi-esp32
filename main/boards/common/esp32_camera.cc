@@ -133,18 +133,12 @@ bool Esp32Camera::Capture() {
         }
         GateXclkOn();
         vTaskDelay(pdMS_TO_TICKS(150));
-        // Only ONE warm-up frame. Right after XCLK is re-attached the sensor
-        // outputs roughly one frame per 1.1s while its PLL / auto-exposure
-        // settle, so the original 6 warm-up frames blocked Capture() for ~9s.
-        // That starved the protocol thread (~300 downlink Opus packets lost)
-        // and let AudioService's 15s power timeout switch the amplifier off
-        // while the device was still speaking -> photo explanation was silent.
-        // CaptureInternal() already grabs two frames and keeps the latest, so
-        // one warm-up frame is enough for auto-exposure to converge.
-        camera_fb_t* fb = esp_camera_fb_get();
-        if (fb) {
-            esp_camera_fb_return(fb);
-        }
+        // No dedicated warm-up frame. CaptureInternal() already grabs two
+        // frames and keeps the newest one, so the extra warm-up frame only
+        // extended the XCLK-on window by ~1.1s -- and that window is exactly
+        // when the 20MHz DVP square wave disturbs 2.4G reception. The camera
+        // worker thread (see McpServer::DoToolCall) no longer blocks the
+        // Application main loop, so only the RF window needs minimising.
     }
 
     bool ok = CaptureInternal();
