@@ -7,10 +7,13 @@
 #include <esp_app_desc.h>
 #include <esp_log.h>
 #include <esp_pthread.h>
+#include <esp_timer.h>
 #include <algorithm>
 #include <cstring>
 #include <iterator>
+#include <mutex>
 #include <optional>
+#include <thread>
 
 #include "application.h"
 #include "board.h"
@@ -100,9 +103,6 @@ void McpServer::AddCommonTools() {
                 "  A JSON object that provides the photo information.",
                 PropertyList({Property("question", kPropertyTypeString)}),
                 [camera](const PropertyList& properties) -> ToolResult {
-                    // Lower the priority to do the camera capture
-                    TaskPriorityReset priority_reset(1);
-
                     if (!camera->Capture()) {
                         return std::unexpected("Failed to capture photo");
                     }
@@ -611,8 +611,45 @@ void McpServer::DoToolCall(int id, const std::string& tool_name, const cJSON* to
         }
     }
 
-    // Use main thread to call the tool
     auto& app = Application::GetInstance();
+
+    // Long-running tools must NOT run on the Application main thread.
+    // self.camera.take_photo re-enables the 20MHz XCLK and then synchronously
+    // waits for camera frames + an HTTP upload (3~9s). Running that inside
+    // app.Schedule() stalls the main loop: TTS/state messages are not
+    // processed, downlink UDP Opus packets are dropped ("wrong sequence"),
+    // the playback queue drains, and AudioService's power timeout mutes the
+    // amplifier in the middle of a sentence.
+    // Execute it on a dedicated worker thread and hop back to the main
+    // thread only to send the JSON-RPC reply, so display / protocol code
+    // keeps running on their original thread.
+    if (tool_name == "self.camera.take_photo") {
+        static std::mutex camera_worker_mutex;
+        ESP_LOGI(TAG, "[ASYNC] dispatch tools/call id=%d to camera worker", id);
+        std::thread([this, id, tool, &app,
+                     arguments = std::move(arguments),
+                     response_sender = std::move(response_sender)]() mutable {
+            // Serialise rapid consecutive photo requests: two captures must
+            // never touch the sensor / XCLK at the same time.
+            std::lock_guard<std::mutex> guard(camera_worker_mutex);
+            const int64_t start_us = esp_timer_get_time();
+            auto result = tool->Call(arguments);
+            ESP_LOGI(TAG, "[ASYNC] camera worker finished in %lld ms",
+                     (long long)((esp_timer_get_time() - start_us) / 1000));
+            app.Schedule([this, id, result = std::move(result),
+                          response_sender = std::move(response_sender)]() mutable {
+                if (!result) {
+                    ESP_LOGE(TAG, "tools/call: %s", result.error().c_str());
+                    ReplyError(id, result.error(), response_sender);
+                    return;
+                }
+                ReplyResult(id, *result, response_sender);
+            });
+        }).detach();
+        return;
+    }
+
+    // Use main thread to call the tool
     app.Schedule([this, id, tool, arguments = std::move(arguments),
                   response_sender = std::move(response_sender)]() {
         auto result = tool->Call(arguments);
