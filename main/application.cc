@@ -440,7 +440,10 @@ void Application::CheckAssetsVersion() {
 }
 
 void Application::CheckNewVersion() {
-    const int MAX_RETRY = 10;
+    // Do not block activation indefinitely when the OTA server is unreachable:
+    // the original 10 retries with doubling backoff could stall for ~2.8h,
+    // leaving the state machine in "activating" with WakeNet never created.
+    const int MAX_RETRY = 3;
     int retry_count = 0;
     int retry_delay = 10;  // Initial retry delay in seconds
 
@@ -485,6 +488,9 @@ void Application::CheckNewVersion() {
                 }
             }
             retry_delay *= 2;  // Double the retry delay
+            if (retry_delay > 20) {
+                retry_delay = 20;  // Cap backoff at 20s: worst case ~50s to idle
+            }
             continue;
         }
         retry_count = 0;
