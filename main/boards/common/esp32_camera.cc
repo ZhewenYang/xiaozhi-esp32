@@ -119,40 +119,19 @@ bool Esp32Camera::Capture() {
     }
 
     if (xclk_gated_) {
-        // Re-initialise the sensor. esp_camera_init() reconnects GPIO15 to
-        // CAM_CLK_IDX via ll_cam_init(), turning XCLK back on.
+        // Do NOT deinit / re-init the driver. After a long XCLK-off period the
+        // OV2640 cannot be re-enumerated: camera_probe() always fails with
+        // ESP_ERR_NOT_SUPPORTED (0x106), even after long settling delays.
+        // LCD_CAM is still configured and its 20MHz generator never stopped,
+        // so simply reconnect GPIO15 to CAM_CLK_IDX, let the sensor PLL
+        // re-lock, and discard warm-up frames before the real capture.
         if (current_fb_) {
             esp_camera_fb_return(current_fb_);
             current_fb_ = nullptr;
         }
-        esp_camera_deinit();
-        // Wake the sensor up BEFORE camera_probe(). After a long clock-off
-        // period the OV2640 PLL is unlocked and SCCB reads garbage, which made
-        // camera_probe() report ESP_ERR_NOT_SUPPORTED (0x106) on the 2nd photo.
         GateXclkOn();
         vTaskDelay(pdMS_TO_TICKS(150));
-        esp_err_t err = esp_camera_init(&config_);
-        if (err != ESP_OK) {
-            ESP_LOGW(TAG, "camera probe failed 0x%x, retrying after settling", err);
-            vTaskDelay(pdMS_TO_TICKS(300));
-            err = esp_camera_init(&config_);
-        }
-        if (err != ESP_OK) {
-            ESP_LOGE(TAG, "esp_camera_init (capture) failed with error 0x%x", err);
-            GateXclkOff();
-            return false;
-        }
-        sensor_t* s = esp_camera_sensor_get();
-        if (s) {
-            if (s->id.PID == GC0308_PID) {
-                s->set_hmirror(s, 0);
-            }
-#if CONFIG_XIAOZHI_CAMERA_MIRROR_CONFIGURED
-            s->set_hmirror(s, kConfiguredHMirror ? 1 : 0);
-            s->set_vflip(s, kConfiguredVFlip ? 1 : 0);
-#endif
-        }
-        // Let the sensor PLL lock and auto-exposure converge before capturing.
+        // Let auto-exposure converge and flush stale frames from the DMA queue.
         for (int i = 0; i < 6; i++) {
             camera_fb_t* fb = esp_camera_fb_get();
             if (fb) {
