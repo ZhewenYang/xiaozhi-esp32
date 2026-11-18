@@ -118,6 +118,8 @@ bool Esp32Camera::Capture() {
         return false;
     }
 
+    const int64_t capture_start_us = esp_timer_get_time();
+
     if (xclk_gated_) {
         // Do NOT deinit / re-init the driver. After a long XCLK-off period the
         // OV2640 cannot be re-enumerated: camera_probe() always fails with
@@ -131,12 +133,17 @@ bool Esp32Camera::Capture() {
         }
         GateXclkOn();
         vTaskDelay(pdMS_TO_TICKS(150));
-        // Let auto-exposure converge and flush stale frames from the DMA queue.
-        for (int i = 0; i < 6; i++) {
-            camera_fb_t* fb = esp_camera_fb_get();
-            if (fb) {
-                esp_camera_fb_return(fb);
-            }
+        // Only ONE warm-up frame. Right after XCLK is re-attached the sensor
+        // outputs roughly one frame per 1.1s while its PLL / auto-exposure
+        // settle, so the original 6 warm-up frames blocked Capture() for ~9s.
+        // That starved the protocol thread (~300 downlink Opus packets lost)
+        // and let AudioService's 15s power timeout switch the amplifier off
+        // while the device was still speaking -> photo explanation was silent.
+        // CaptureInternal() already grabs two frames and keeps the latest, so
+        // one warm-up frame is enough for auto-exposure to converge.
+        camera_fb_t* fb = esp_camera_fb_get();
+        if (fb) {
+            esp_camera_fb_return(fb);
         }
     }
 
@@ -145,6 +152,8 @@ bool Esp32Camera::Capture() {
     // transfer never overlaps with the 20MHz DVP radiation.
     if (xclk_gated_) {
         GateXclkOff();
+        ESP_LOGI(TAG, "[XCLK-GATE] capture round-trip %lld ms",
+                 (long long)((esp_timer_get_time() - capture_start_us) / 1000));
     }
     return ok;
 }
