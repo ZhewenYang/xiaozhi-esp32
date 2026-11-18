@@ -5,6 +5,7 @@
 #include <driver/gpio.h>
 #include <esp_rom_gpio.h>
 #include <soc/gpio_sig_map.h>
+#include <freertos/task.h>
 #include <img_converters.h>
 #include <cstdio>
 #include <cstring>
@@ -76,6 +77,18 @@ void Esp32Camera::GateXclkOff() {
              config_.pin_xclk);
 }
 
+void Esp32Camera::GateXclkOn() {
+    if (config_.pin_xclk < 0) {
+        return;
+    }
+    // LCD_CAM keeps generating the 20MHz clock (esp32-camera#869); reconnect
+    // the pin to CAM_CLK_IDX so the sensor gets its master clock back.
+    gpio_set_direction(static_cast<gpio_num_t>(config_.pin_xclk), GPIO_MODE_OUTPUT);
+    esp_rom_gpio_connect_out_signal(config_.pin_xclk, CAM_CLK_IDX, false, false);
+    ESP_LOGI(TAG, "[XCLK-GATE] GPIO%d attached back to CAM_CLK_IDX",
+             config_.pin_xclk);
+}
+
 Esp32Camera::~Esp32Camera() {
     if (streaming_on_) {
         if (current_fb_) {
@@ -114,7 +127,17 @@ bool Esp32Camera::Capture() {
             current_fb_ = nullptr;
         }
         esp_camera_deinit();
+        // Wake the sensor up BEFORE camera_probe(). After a long clock-off
+        // period the OV2640 PLL is unlocked and SCCB reads garbage, which made
+        // camera_probe() report ESP_ERR_NOT_SUPPORTED (0x106) on the 2nd photo.
+        GateXclkOn();
+        vTaskDelay(pdMS_TO_TICKS(150));
         esp_err_t err = esp_camera_init(&config_);
+        if (err != ESP_OK) {
+            ESP_LOGW(TAG, "camera probe failed 0x%x, retrying after settling", err);
+            vTaskDelay(pdMS_TO_TICKS(300));
+            err = esp_camera_init(&config_);
+        }
         if (err != ESP_OK) {
             ESP_LOGE(TAG, "esp_camera_init (capture) failed with error 0x%x", err);
             GateXclkOff();
@@ -131,7 +154,7 @@ bool Esp32Camera::Capture() {
 #endif
         }
         // Let the sensor PLL lock and auto-exposure converge before capturing.
-        for (int i = 0; i < 4; i++) {
+        for (int i = 0; i < 6; i++) {
             camera_fb_t* fb = esp_camera_fb_get();
             if (fb) {
                 esp_camera_fb_return(fb);
