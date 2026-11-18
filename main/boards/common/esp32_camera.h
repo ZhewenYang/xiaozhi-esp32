@@ -35,6 +35,7 @@ private:
     camera_config_t config_{};
     bool xclk_gated_ = false;
     void GateXclkOff();
+    void GateXclkOn();
     bool CaptureInternal();
 
 public:
