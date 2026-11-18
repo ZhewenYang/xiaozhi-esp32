@@ -3,6 +3,11 @@ name: Build Boards
 on:
   # Manual runs exercise the full matrix, including CI-specific options.
   workflow_dispatch:
+    inputs:
+      board:
+        description: 'Build only this board directory (e.g. bread-compact-wifi-s3cam); empty = full matrix'
+        required: false
+        type: string
   push:
     branches:
       - main
@@ -37,11 +42,16 @@ jobs:
         env:
           EVENT_NAME: ${{ github.event_name }}
           BEFORE_SHA: ${{ github.event.before }}
+          BOARD_FILTER: ${{ inputs.board }}
         run: |
           git config --global --add safe.directory "$GITHUB_WORKSPACE"
           CHANGED_FILE="$RUNNER_TEMP/changed-files.txt"
           if [[ "$EVENT_NAME" == "workflow_dispatch" ]]; then
-            git ls-files > "$CHANGED_FILE"
+            if [[ -n "$BOARD_FILTER" ]]; then
+              printf 'main/boards/%s/config.json\n' "$BOARD_FILTER" > "$CHANGED_FILE"
+            else
+              git ls-files > "$CHANGED_FILE"
+            fi
           elif [[ "$EVENT_NAME" == "pull_request" ]]; then
             # Checkout is the synthetic merge commit. Compare the PR branch
             # from its merge base, excluding unrelated updates on main.
