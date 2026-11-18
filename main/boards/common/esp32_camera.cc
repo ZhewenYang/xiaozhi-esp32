@@ -2,6 +2,9 @@
 
 #include <esp_heap_caps.h>
 #include <esp_log.h>
+#include <driver/gpio.h>
+#include <esp_rom_gpio.h>
+#include <soc/gpio_sig_map.h>
 #include <img_converters.h>
 #include <cstdio>
 #include <cstring>
@@ -30,7 +33,8 @@ static constexpr bool kConfiguredVFlip = false;
 #endif
 #endif
 
-Esp32Camera::Esp32Camera(const camera_config_t& config) {
+Esp32Camera::Esp32Camera(const camera_config_t& config, bool enable_xclk_gating)
+    : config_(config), xclk_gated_(enable_xclk_gating) {
     esp_err_t err = esp_camera_init(&config);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "esp_camera_init failed with error 0x%x", err);
@@ -50,6 +54,26 @@ Esp32Camera::Esp32Camera(const camera_config_t& config) {
     }
 
     streaming_on_ = true;
+
+    // On ESP32-S3 CAMERA_DISABLE_OUT_CLOCK() is an EMPTY macro, so LCD_CAM keeps
+    // driving a 20MHz square wave on the XCLK pin forever -- even after
+    // esp_camera_deinit(). With a long DVP ribbon this radiates into the 2.4G
+    // antenna, WiFi TX buffers saturate and sendto() returns ENOMEM.
+    // Detach the pin from the clock matrix and drive it LOW until a capture.
+    if (xclk_gated_) {
+        GateXclkOff();
+    }
+}
+
+void Esp32Camera::GateXclkOff() {
+    if (config_.pin_xclk < 0) {
+        return;
+    }
+    esp_rom_gpio_connect_out_signal(config_.pin_xclk, SIG_GPIO_OUT_IDX, false, false);
+    gpio_set_direction(static_cast<gpio_num_t>(config_.pin_xclk), GPIO_MODE_OUTPUT);
+    gpio_set_level(static_cast<gpio_num_t>(config_.pin_xclk), 0);
+    ESP_LOGI(TAG, "[XCLK-GATE] GPIO%d detached from CAM_CLK_IDX, driven LOW",
+             config_.pin_xclk);
 }
 
 Esp32Camera::~Esp32Camera() {
@@ -81,6 +105,50 @@ bool Esp32Camera::Capture() {
     if (!streaming_on_) {
         return false;
     }
+
+    if (xclk_gated_) {
+        // Re-initialise the sensor. esp_camera_init() reconnects GPIO15 to
+        // CAM_CLK_IDX via ll_cam_init(), turning XCLK back on.
+        if (current_fb_) {
+            esp_camera_fb_return(current_fb_);
+            current_fb_ = nullptr;
+        }
+        esp_camera_deinit();
+        esp_err_t err = esp_camera_init(&config_);
+        if (err != ESP_OK) {
+            ESP_LOGE(TAG, "esp_camera_init (capture) failed with error 0x%x", err);
+            GateXclkOff();
+            return false;
+        }
+        sensor_t* s = esp_camera_sensor_get();
+        if (s) {
+            if (s->id.PID == GC0308_PID) {
+                s->set_hmirror(s, 0);
+            }
+#if CONFIG_XIAOZHI_CAMERA_MIRROR_CONFIGURED
+            s->set_hmirror(s, kConfiguredHMirror ? 1 : 0);
+            s->set_vflip(s, kConfiguredVFlip ? 1 : 0);
+#endif
+        }
+        // Let the sensor PLL lock and auto-exposure converge before capturing.
+        for (int i = 0; i < 4; i++) {
+            camera_fb_t* fb = esp_camera_fb_get();
+            if (fb) {
+                esp_camera_fb_return(fb);
+            }
+        }
+    }
+
+    bool ok = CaptureInternal();
+    // Turn the clock off BEFORE JPEG encoding / HTTP upload, so the network
+    // transfer never overlaps with the 20MHz DVP radiation.
+    if (xclk_gated_) {
+        GateXclkOff();
+    }
+    return ok;
+}
+
+bool Esp32Camera::CaptureInternal() {
 
     // Get the latest frame, discard old frames for real-time performance
     for (int i = 0; i < 2; i++) {
