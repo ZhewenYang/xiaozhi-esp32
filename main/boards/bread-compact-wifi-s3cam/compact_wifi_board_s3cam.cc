@@ -11,6 +11,9 @@
 #include "esp32_camera.h"
 
 #include <esp_log.h>
+#include <driver/gpio.h>
+#include <esp_rom_gpio.h>
+#include <soc/gpio_sig_map.h>
 #include <driver/i2c_master.h>
 #include <esp_lcd_panel_vendor.h>
 #include <esp_lcd_panel_io.h>
@@ -151,6 +154,22 @@ private:
         config.fb_location = CAMERA_FB_IN_PSRAM;
         config.grab_mode = CAMERA_GRAB_WHEN_EMPTY;
         camera_ = new Esp32Camera(config);
+
+        // ---- [XCLK-GATE / A-B TEST BUILD] --------------------------------
+        // espressif/esp32-camera#869: on ESP32-S3 CAMERA_DISABLE_OUT_CLOCK()
+        // is an EMPTY macro, so LCD_CAM keeps driving a 20MHz XCLK on GPIO15
+        // forever -- even after esp_camera_deinit(). The long DVP ribbon then
+        // radiates into the 2.4G antenna, WiFi TX buffer saturates and
+        // sendto() returns ENOMEM (EspUdp: Send failed, errno=12).
+        // Detach GPIO15 from CAM_CLK_IDX and drive it LOW. A later
+        // esp_camera_init() reconnects the clock matrix automatically.
+        // NOTE: with XCLK off the sensor no longer streams, so take_photo
+        // will not work in this test build. That is intentional.
+        esp_rom_gpio_connect_out_signal(CAMERA_PIN_XCLK, SIG_GPIO_OUT_IDX, false, false);
+        gpio_set_direction(CAMERA_PIN_XCLK, GPIO_MODE_OUTPUT);
+        gpio_set_level(CAMERA_PIN_XCLK, 0);
+        ESP_LOGW(TAG, "[XCLK-GATE] GPIO%d detached from CAM_CLK_IDX, driven LOW (A/B test)", (int)CAMERA_PIN_XCLK);
+        // ------------------------------------------------------------------
     }
 
     void InitializeButtons() {
