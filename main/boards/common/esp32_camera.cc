@@ -5,7 +5,6 @@
 #include <driver/gpio.h>
 #include <esp_rom_gpio.h>
 #include <soc/gpio_sig_map.h>
-#include <freertos/task.h>
 #include <img_converters.h>
 #include <cstdio>
 #include <cstring>
