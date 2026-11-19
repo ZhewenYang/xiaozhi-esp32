@@ -2,6 +2,7 @@
 #define _BOARD_CONFIG_H_
 
 #include <driver/gpio.h>
+#include <driver/uart.h>
 
 #define AUDIO_INPUT_SAMPLE_RATE  16000
 #define AUDIO_OUTPUT_SAMPLE_RATE 24000
@@ -307,7 +308,15 @@
 #endif
 
 
-// A MCP Test: Control a lamp
-#define LAMP_GPIO GPIO_NUM_14
+// Pan/tilt head link to the sub-board (ESP32-S3 + two SG90 servos).
+// One-wire UART, 115200 8N1, one command per line: "shake=<deg>", "nod=<deg>",
+// "center".
+//   this board GPIO14 (TX) ----> sub-board GPIO18 (RX)
+//   GND ----------------------- GND   (common ground is mandatory)
+// GPIO14 was the old LAMP_GPIO placeholder on this board and was never
+// instantiated, so it is the correct spare pin here. GPIO3 is also free but it is
+// a strapping pin on the S3, so it is deliberately left unused.
+#define HEAD_UART_PORT   UART_NUM_1
+#define HEAD_UART_TX_PIN GPIO_NUM_14
 
 #endif // _BOARD_CONFIG_H_

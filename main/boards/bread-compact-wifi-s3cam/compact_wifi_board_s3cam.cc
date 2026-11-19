@@ -9,6 +9,7 @@
 #include "lamp_controller.h"
 #include "led/single_led.h"
 #include "esp32_camera.h"
+#include "head_controller.h"
 
 #include <esp_log.h>
 #include <driver/i2c_master.h>
@@ -66,6 +67,7 @@ private:
     Button boot_button_;
     LcdDisplay* display_;
     Esp32Camera* camera_;
+    HeadController* head_controller_ = nullptr;
 
     void InitializeSpi() {
         spi_bus_config_t buscfg = {};
@@ -172,6 +174,8 @@ public:
         InitializeLcdDisplay();
         InitializeButtons();
         InitializeCamera();
+        // Registers self.head.* tools; the head itself is driven by the sub-board.
+        head_controller_ = new HeadController(HEAD_UART_PORT, HEAD_UART_TX_PIN);
         if (DISPLAY_BACKLIGHT_PIN != GPIO_NUM_NC) {
             GetBacklight()->RestoreBrightness();
         }
