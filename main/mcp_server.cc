@@ -634,40 +634,50 @@ void McpServer::DoToolCall(int id, const std::string& tool_name, const cJSON* to
             // never touch the sensor / XCLK at the same time.
             std::lock_guard<std::mutex> guard(camera_worker_mutex);
 
-            // Do not open the 20MHz XCLK window while speech is still being
-            // received or played. The previous photo's explanation may still
-            // be streaming when a rapid consecutive capture request arrives;
-            // overlapping that window with UDP audio causes permanent gaps.
-            // Waiting here blocks only the camera worker, never the main loop.
-            constexpr int64_t kPlaybackWaitTimeoutUs = 45 * 1000000LL;
-            int64_t playback_wait_start_us = 0;
-            while (true) {
-                DeviceState state = app.GetDeviceState();
-                bool playback_idle = app.GetAudioService().IsPlaybackIdle();
-                bool playback_active = state == kDeviceStateSpeaking ||
-                                       state == kDeviceStateNotifying || !playback_idle;
-                if (!playback_active) {
+            // Do not open the 20MHz XCLK window while audio is still being
+            // played out: overlapping that window with incoming audio is what
+            // made the speaker drop words (esp32-camera #869).
+            //
+            // Gate on the playback pipeline only, never on the device state.
+            // During a tool call the server keeps the device in "speaking"
+            // while it waits for our result, so a state-based gate can never
+            // become false (that deadlocked v15 for 45s and failed the shot).
+            // We wait until the queue has been continuously empty for a short
+            // window, which also avoids capturing in the gap between two TTS
+            // chunks. If it refuses to drain we still capture: a slower photo
+            // beats a failed one. Only the camera worker is blocked here.
+            constexpr int64_t kDrainStableUs = 250 * 1000LL;
+            constexpr int64_t kDrainWaitMaxUs = 8 * 1000000LL;
+            const int64_t wait_start_us = esp_timer_get_time();
+            int64_t idle_since_us = 0;
+            bool busy_seen = false;
+            bool drained = false;
+            for (;;) {
+                int64_t now_us = esp_timer_get_time();
+                if (!app.GetAudioService().IsPlaybackIdle()) {
+                    if (!busy_seen) {
+                        busy_seen = true;
+                        ESP_LOGI(TAG, "[CAM-WAIT] playback busy; holding XCLK off");
+                    }
+                    idle_since_us = 0;
+                } else {
+                    if (idle_since_us == 0) {
+                        idle_since_us = now_us;
+                    }
+                    if (now_us - idle_since_us >= kDrainStableUs) {
+                        drained = true;
+                        break;
+                    }
+                }
+                if (now_us - wait_start_us >= kDrainWaitMaxUs) {
                     break;
                 }
-                int64_t now_us = esp_timer_get_time();
-                if (playback_wait_start_us == 0) {
-                    playback_wait_start_us = now_us;
-                    ESP_LOGI(TAG,
-                             "[CAM-WAIT] defer capture until playback drains (state=%d, idle=%d)",
-                             (int)state, (int)playback_idle);
-                } else if (now_us - playback_wait_start_us > kPlaybackWaitTimeoutUs) {
-                    ESP_LOGW(TAG, "[CAM-WAIT] playback did not finish within 45s");
-                    app.Schedule([this, id, response_sender = std::move(response_sender)]() mutable {
-                        ReplyError(id, -32603, "Timed out waiting for audio playback to finish",
-                                   response_sender);
-                    });
-                    return;
-                }
-                std::this_thread::sleep_for(std::chrono::milliseconds(50));
+                std::this_thread::sleep_for(std::chrono::milliseconds(20));
             }
-            if (playback_wait_start_us != 0) {
-                ESP_LOGI(TAG, "[CAM-WAIT] playback drained after %lld ms; capture allowed",
-                         (long long)((esp_timer_get_time() - playback_wait_start_us) / 1000));
+            ESP_LOGI(TAG, "[CAM-WAIT] capture allowed after %lld ms (drained=%d)",
+                     (long long)((esp_timer_get_time() - wait_start_us) / 1000), (int)drained);
+            if (!drained) {
+                ESP_LOGW(TAG, "[CAM-WAIT] playback never fully drained; capturing anyway");
             }
 
             const int64_t start_us = esp_timer_get_time();
