@@ -792,8 +792,23 @@ bool AudioService::IsIdle() {
 
 void AudioService::SetPlaybackSessionActive(bool active) {
     bool previous = playback_session_active_.exchange(active);
-    if (previous != active) {
-        ESP_LOGI(TAG, "[POWER] playback session %s", active ? "active" : "inactive");
+    if (previous == active) {
+        return;
+    }
+    ESP_LOGI(TAG, "[POWER] playback session %s", active ? "active" : "inactive");
+
+    if (active && codec_ != nullptr && !codec_->output_enabled()) {
+        // Power the DAC/PA up as soon as the reply starts instead of waiting
+        // for the first PCM frame. The playback task enables the output right
+        // before OutputData(), so the codec ramp (a few tens of ms) swallows
+        // the opening syllable of a reply that follows a long silent gap --
+        // this is the "first word half eaten" symptom, reproducible after the
+        // 30s idle timeout powers the output down. Enabling here lets the ramp
+        // happen during silence.
+        esp_timer_stop(audio_power_timer_);
+        esp_timer_start_periodic(audio_power_timer_, AUDIO_POWER_CHECK_INTERVAL_MS * 1000);
+        codec_->EnableOutput(true);
+        ESP_LOGI(TAG, "[POWER] output pre-enabled for playback session");
     }
 }
 
