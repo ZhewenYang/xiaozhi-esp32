@@ -100,15 +100,11 @@ void Application::Initialize() {
     });
 
     // Music playback (self.audio_speaker.play_url) owns the speaker while it
-    // runs. Any transition away from idle means the user woke the device or a
-    // reply started, so the stream has to stop immediately: otherwise the ASR
-    // would hear the music and the TTS would be drowned out.
-    state_machine_.AddStateChangeListener([](DeviceState old_state, DeviceState new_state) {
-        if (new_state != kDeviceStateIdle && MusicPlayer::GetInstance().IsPlaying()) {
-            ESP_LOGI(TAG, "Music playback stopped: device state -> %d", static_cast<int>(new_state));
-            MusicPlayer::GetInstance().Stop();
-        }
-    });
+    // runs, but it must survive the reply that announces it: the LLM calls the
+    // tool and says "playing now" at the same time, so the speaking -> listening
+    // transition that follows a reply used to cut the song after a few seconds.
+    // The stream is stopped only on real user interaction, i.e. in
+    // HandleWakeWordDetectedEvent() and the push-to-talk handlers.
 
     // The player feeds decoded PCM into the audio service playback path.
     MusicPlayer::GetInstance().Initialize(&audio_service_);
@@ -253,7 +249,16 @@ void Application::Run() {
         }
 
         if (bits & MAIN_EVENT_SEND_AUDIO) {
+            // The microphone keeps picking up the song while the music stream
+            // runs. Uploading that makes the server's ASR transcribe lyrics as
+            // if the user had spoken, which starts a bogus reply and kills the
+            // stream mid-song. Drop the frames instead; wake word detection is
+            // local, so the user can still barge in with the wake word.
+            const bool music_playing = MusicPlayer::GetInstance().IsPlaying();
             while (auto packet = audio_service_.PopPacketFromSendQueue()) {
+                if (music_playing) {
+                    continue;
+                }
                 if (protocol_ && !protocol_->SendAudio(std::move(packet))) {
                     // Drop the remaining packets. Leaving them in the queue would
                     // stall the Opus codec task (it waits for queue space), which in
@@ -800,6 +805,8 @@ void Application::StopListening() { xEventGroupSetBits(event_group_, MAIN_EVENT_
 
 void Application::HandleToggleChatEvent() {
     auto state = GetDeviceState();
+    // A button press is a user interaction: barge in over the music.
+    MusicPlayer::GetInstance().Stop();
 
     if (state == kDeviceStateNotifying) {
         StopNotification();
@@ -864,6 +871,7 @@ void Application::ContinueOpenAudioChannel(ListeningMode mode) {
 
 void Application::HandleStartListeningEvent() {
     auto state = GetDeviceState();
+    MusicPlayer::GetInstance().Stop();
 
     if (state == kDeviceStateNotifying) {
         StopNotification();
@@ -922,6 +930,11 @@ void Application::HandleWakeWordDetectedEvent() {
 
     auto state = GetDeviceState();
     auto wake_word = audio_service_.GetLastWakeWord();
+    // The wake word is the intended way to barge in over music playback.
+    if (MusicPlayer::GetInstance().IsPlaying()) {
+        ESP_LOGI(TAG, "Music playback stopped: wake word");
+        MusicPlayer::GetInstance().Stop();
+    }
     ESP_LOGI(TAG, "Wake word detected: %s (state: %d)", wake_word.c_str(), (int)state);
 
     if (state == kDeviceStateIdle) {

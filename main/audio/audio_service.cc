@@ -836,6 +836,19 @@ void AudioService::SetPlaybackSessionActive(bool active) {
     }
 }
 
+void AudioService::EnsureOutputEnabled() {
+    if (codec_ == nullptr || codec_->output_enabled()) {
+        return;
+    }
+    // The playback task normally enables the output right before OutputData(),
+    // but that leaves the DAC/PA ramp (tens of ms) inside the first music chunk.
+    // Power up here, while the stream is still being opened.
+    esp_timer_stop(audio_power_timer_);
+    esp_timer_start_periodic(audio_power_timer_, AUDIO_POWER_CHECK_INTERVAL_MS * 1000);
+    codec_->EnableOutput(true);
+    ESP_LOGI(TAG, "[POWER] output enabled for music stream");
+}
+
 bool AudioService::IsPlaybackIdle() {
     std::lock_guard<std::mutex> lock(audio_queue_mutex_);
     return IsPlaybackDrainedLocked();

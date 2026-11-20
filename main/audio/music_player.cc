@@ -45,15 +45,6 @@ constexpr int kMaxRedirects = 6;
 StackType_t* s_task_stack = nullptr;
 StaticTask_t* s_task_tcb = nullptr;
 
-// Releasing the amplifier session unconditionally would cut the power
-// pre-enable that Application relies on while a TTS reply is being spoken, so
-// only do it when the device is back to idle.
-void EndPlaybackSession(AudioService* service) {
-    if (Application::GetInstance().GetDeviceState() == kDeviceStateIdle) {
-        service->SetPlaybackSessionActive(false);
-    }
-}
-
 }  // namespace
 
 MusicPlayer& MusicPlayer::GetInstance() {
@@ -191,7 +182,9 @@ void MusicPlayer::ReleaseStream() {
 
 void MusicPlayer::Playback(const std::string& url) {
     ESP_LOGI(TAG, "opening %s", url.c_str());
-    audio_service_->SetPlaybackSessionActive(true);
+    // Do not claim a playback session here: the session flag belongs to server
+    // replies, and the music stream has to yield to them (see FeedPcm()).
+    audio_service_->EnsureOutputEnabled();
 
     esp_http_client_config_t config = {};
     config.url = url.c_str();
@@ -205,7 +198,6 @@ void MusicPlayer::Playback(const std::string& url) {
     esp_http_client_handle_t client = esp_http_client_init(&config);
     if (client == nullptr) {
         ESP_LOGE(TAG, "failed to init http client");
-        EndPlaybackSession(audio_service_);
         return;
     }
 
@@ -239,7 +231,6 @@ void MusicPlayer::Playback(const std::string& url) {
         ESP_LOGE(TAG, "stream unavailable (http %d)", status);
         esp_http_client_close(client);
         esp_http_client_cleanup(client);
-        EndPlaybackSession(audio_service_);
         return;
     }
 
@@ -252,7 +243,6 @@ void MusicPlayer::Playback(const std::string& url) {
         ESP_LOGE(TAG, "mp3 decoder open failed: %d", ret);
         esp_http_client_close(client);
         esp_http_client_cleanup(client);
-        EndPlaybackSession(audio_service_);
         return;
     }
     decoder_ = decoder;
@@ -263,7 +253,6 @@ void MusicPlayer::Playback(const std::string& url) {
         ESP_LOGE(TAG, "out of memory for stream buffers");
         esp_http_client_close(client);
         esp_http_client_cleanup(client);
-        EndPlaybackSession(audio_service_);
         return;
     }
     out_buf_size_ = kOutBufSize;
@@ -369,7 +358,6 @@ void MusicPlayer::Playback(const std::string& url) {
 
     esp_http_client_close(client);
     esp_http_client_cleanup(client);
-    EndPlaybackSession(audio_service_);
 }
 
 void MusicPlayer::FeedPcm(const uint8_t* data, size_t size, uint32_t sample_rate, uint8_t channels,
@@ -434,6 +422,13 @@ void MusicPlayer::FeedPcm(const uint8_t* data, size_t size, uint32_t sample_rate
     const size_t chunk = std::max<size_t>(1, target_rate * kChunkMs / 1000);
     size_t offset = 0;
     while (offset < source->size() && !stop_requested_.load()) {
+        // A server reply owns the speaker. Keep the decoded PCM here and stop
+        // pulling from the socket until the reply is over, so the sentence is
+        // not interleaved with music and the stream resumes afterwards.
+        if (audio_service_->IsPlaybackSessionActive()) {
+            vTaskDelay(pdMS_TO_TICKS(30));
+            continue;
+        }
         const size_t n = std::min(chunk, source->size() - offset);
         std::vector<int16_t> block(source->begin() + offset, source->begin() + offset + n);
         if (!audio_service_->EnqueuePlaybackPcm(std::move(block))) {

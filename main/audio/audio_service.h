@@ -131,6 +131,12 @@ public:
     // Set by Application for speaking / notification sessions. While active,
     // the idle power timer must not mute the amplifier during network gaps.
     void SetPlaybackSessionActive(bool active);
+    // True while a server reply (TTS) or notification owns the speaker. The
+    // music stream watches this to yield the output queue during a reply.
+    bool IsPlaybackSessionActive() const { return playback_session_active_.load(); }
+    // Powers the DAC/PA up without claiming a playback session, so that the
+    // music stream can start on a silent output stage without blocking TTS.
+    void EnsureOutputEnabled();
     bool IsWakeWordRunning() const {
         return xEventGroupGetBits(event_group_) & AS_EVENT_WAKE_WORD_RUNNING;
     }
