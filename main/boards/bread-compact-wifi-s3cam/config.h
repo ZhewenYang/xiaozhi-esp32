@@ -52,7 +52,11 @@
 #define CAMERA_PIN_SIOD GPIO_NUM_4
 #define CAMERA_PIN_PWDN GPIO_NUM_NC
 #define CAMERA_PIN_RESET GPIO_NUM_NC
-#define XCLK_FREQ_HZ 20000000
+// v19: FPC 延长线把 PCLK/D0-D7 的 20MHz 并行总线拉到 20cm 以上，边沿被线容
+// 拖慢，VSYNC 相对数据提前到达，cam_hal 每帧只收到 474/480 行（差 6 行 = 一个
+// dma_half_buffer），整帧被判定不完整丢弃。把 XCLK 降到 10MHz，PCLK 同步减半，
+// 建立/保持裕量翻倍。拍照对帧率无要求，代价可忽略。
+#define XCLK_FREQ_HZ 10000000
 
 // The 20MHz XCLK on GPIO15 couples into Wi-Fi and drops downlink UDP Opus
 // packets (esp32-camera #869). Firmware keeps this clock gated except during
