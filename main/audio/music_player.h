@@ -2,6 +2,7 @@
 #define MUSIC_PLAYER_H
 
 #include <atomic>
+#include <cstddef>
 #include <mutex>
 #include <string>
 #include <vector>
@@ -38,8 +39,9 @@ public:
     /** Must be called once after AudioService::Start(). */
     void Initialize(AudioService* audio_service);
 
-    /** Stops the current stream (if any) and starts `url`. Non-blocking. */
-    bool Play(const std::string& url);
+    /** Stops the current stream (if any) and starts `url`. Non-blocking.
+     *  `title` is only used for the screen ("正在播放 ..."). */
+    bool Play(const std::string& url, const std::string& title = "");
 
     /** Asks the worker to stop. Returns immediately; the worker exits within
      *  a few hundred milliseconds. */
@@ -47,15 +49,23 @@ public:
 
     bool IsPlaying() const { return playing_.load(); }
     std::string GetCurrentUrl() const;
+    std::string GetCurrentTitle() const;
 
 private:
     MusicPlayer() = default;
     MusicPlayer(const MusicPlayer&) = delete;
     MusicPlayer& operator=(const MusicPlayer&) = delete;
 
+    enum class StreamResult { kEndOfStream, kInterrupted, kStopped, kFatal };
+
     static void TaskEntry(void* arg);
     void TaskLoop();
     void Playback(const std::string& url);
+    // Opens `url` at `offset`, streams and decodes until the body ends, the
+    // socket dies, or Stop() is called. `offset` is advanced by every byte read.
+    StreamResult StreamOnce(const std::string& url, size_t& offset);
+    bool EnsureDecoder();
+    void KeepRadioAwake();
     void FeedPcm(const uint8_t* data, size_t size, uint32_t sample_rate, uint8_t channels,
                  uint8_t bits);
     void ReleaseStream();
@@ -65,11 +75,16 @@ private:
     mutable std::mutex url_mutex_;
     std::string pending_url_;
     std::string current_url_;
+    std::string current_title_;
+    std::string pending_title_;
     std::atomic<bool> stop_requested_{false};
     std::atomic<bool> playing_{false};
     // False when no MP3 decoder could be registered (see Initialize); Play()
     // then fails fast instead of streaming into a dead decoder.
     std::atomic<bool> decoder_ready_{false};
+    // Set once per stream, when the first PCM chunk actually reaches the queue.
+    bool idle_requested_ = false;
+    int64_t last_power_check_us_ = 0;
 
     // Stream state, only touched by the worker task.
     void* decoder_ = nullptr;

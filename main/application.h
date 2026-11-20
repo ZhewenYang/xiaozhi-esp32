@@ -118,6 +118,21 @@ public:
     AecMode GetAecMode() const { return aec_mode_; }
     void PlaySound(const std::string_view& sound);
     AudioService& GetAudioService() { return audio_service_; }
+
+    /**
+     * Called by MusicPlayer once a stream is really playing (i.e. after the
+     * reply that announced it has finished). The server keeps the audio channel
+     * open in listening mode and ends the session with a spoken goodbye after a
+     * long silence, which talks over the music. Leaving listening politely keeps
+     * the screen and the server quiet while wake word detection stays on.
+     */
+    void EnterIdleForMusicPlayback();
+
+    /**
+     * Repaints the idle screen so it shows the current song (or standby once
+     * MusicPlayer stops). Must run in the main task.
+     */
+    void RefreshMusicDisplay();
     
     /**
      * Reset protocol resources (thread-safe)

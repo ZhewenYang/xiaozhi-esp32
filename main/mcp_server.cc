@@ -72,17 +72,21 @@ void McpServer::AddCommonTools() {
             "never say the device cannot play audio -- this tool is exactly how it plays.\n"
             "Args:\n"
             "  `url`: The full http(s) URL of an audio file (redirects are followed automatically).\n"
+            "  `title`: The song name and artist as returned by the music tool, e.g. "
+            "\"李玲玉 - 天竺少女\". Shown on the device screen while it plays.\n"
             "Return:\n"
             "  JSON `{\"ok\":true}` when streaming started, or `{\"ok\":false,\"error\":...}` when it "
             "did not. Only tell the user playback started when ok is true.",
-            PropertyList({Property("url", kPropertyTypeString)}),
+            PropertyList({Property("url", kPropertyTypeString),
+                          Property("title", kPropertyTypeString, "")}),
             [](const PropertyList& properties) -> ReturnValue {
                 auto url = properties["url"].value<std::string>();
+                auto title = properties["title"].value<std::string>();
                 if (url.rfind("http://", 0) != 0 && url.rfind("https://", 0) != 0) {
                     return std::string(
                         "{\"ok\":false,\"error\":\"url must start with http:// or https://\"}");
                 }
-                if (!MusicPlayer::GetInstance().Play(url)) {
+                if (!MusicPlayer::GetInstance().Play(url, title)) {
                     return std::string(
                         "{\"ok\":false,\"error\":\"player not ready on this device, check device log\"}");
                 }

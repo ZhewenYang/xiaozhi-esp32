@@ -1,6 +1,7 @@
 #include "music_player.h"
 
 #include <algorithm>
+#include <cstdio>
 #include <cstring>
 
 #include <esp_crt_bundle.h>
@@ -32,6 +33,9 @@ constexpr size_t kTaskStackBytes = 24 * 1024;
 // which gives ~240 ms of slack against network jitter.
 constexpr size_t kChunkMs = 120;
 constexpr int kMaxRedirects = 6;
+// A CDN socket can be closed at any point; resume that many times before
+// treating the stream as dead for good.
+constexpr int kMaxReconnects = 6;
 
 #define MUSIC_RATE_CVT_CFG(_src_rate, _dest_rate)                               \
     (esp_ae_rate_cvt_cfg_t) {                                                   \
@@ -98,7 +102,12 @@ std::string MusicPlayer::GetCurrentUrl() const {
     return current_url_;
 }
 
-bool MusicPlayer::Play(const std::string& url) {
+std::string MusicPlayer::GetCurrentTitle() const {
+    std::lock_guard<std::mutex> lock(url_mutex_);
+    return current_title_;
+}
+
+bool MusicPlayer::Play(const std::string& url, const std::string& title) {
     if (audio_service_ == nullptr || request_sem_ == nullptr || url.empty()) {
         ESP_LOGW(TAG, "play rejected: player not initialized or empty url");
         return false;
@@ -110,6 +119,7 @@ bool MusicPlayer::Play(const std::string& url) {
     {
         std::lock_guard<std::mutex> lock(url_mutex_);
         pending_url_ = url;
+        pending_title_ = title;
     }
     // Interrupt whatever is running, then hand the new URL to the worker.
     stop_requested_ = true;
@@ -140,6 +150,8 @@ void MusicPlayer::TaskLoop() {
             url = pending_url_;
             pending_url_.clear();
             current_url_ = url;
+            current_title_ = pending_title_;
+            pending_title_.clear();
         }
         if (url.empty()) {
             continue;
@@ -152,7 +164,11 @@ void MusicPlayer::TaskLoop() {
         {
             std::lock_guard<std::mutex> lock(url_mutex_);
             current_url_.clear();
+            current_title_.clear();
         }
+        // Bring the screen back to standby now that nothing is playing.
+        Application::GetInstance().Schedule(
+            []() { Application::GetInstance().RefreshMusicDisplay(); });
         ESP_LOGI(TAG, "playback finished");
     }
 }
@@ -180,15 +196,41 @@ void MusicPlayer::ReleaseStream() {
     std::vector<int16_t>().swap(resampled_);
 }
 
-void MusicPlayer::Playback(const std::string& url) {
-    ESP_LOGI(TAG, "opening %s", url.c_str());
-    // Do not claim a playback session here: the session flag belongs to server
-    // replies, and the music stream has to yield to them (see FeedPcm()).
-    audio_service_->EnsureOutputEnabled();
+bool MusicPlayer::EnsureDecoder() {
+    if (decoder_ != nullptr) {
+        return true;
+    }
+    esp_audio_simple_dec_cfg_t dec_cfg = {};
+    dec_cfg.dec_type = ESP_AUDIO_SIMPLE_DEC_TYPE_MP3;
+    dec_cfg.use_frame_dec = false;
+    esp_audio_simple_dec_handle_t decoder = nullptr;
+    auto ret = esp_audio_simple_dec_open(&dec_cfg, &decoder);
+    if (ret != ESP_AUDIO_ERR_OK || decoder == nullptr) {
+        ESP_LOGE(TAG, "mp3 decoder open failed: %d", ret);
+        return false;
+    }
+    decoder_ = decoder;
+    return true;
+}
 
+void MusicPlayer::KeepRadioAwake() {
+    // The audio channel close path drops the radio to modem sleep, and a
+    // modem-sleeping station loses most of a sustained HTTP stream: the CDN
+    // socket eventually dies with ENOTCONN in the middle of a song. Re-assert
+    // performance mode periodically while streaming (cheap: the driver ignores
+    // a no-op change).
+    const int64_t now = esp_timer_get_time();
+    if (now - last_power_check_us_ < 2000000) {
+        return;
+    }
+    last_power_check_us_ = now;
+    Board::GetInstance().SetPowerSaveLevel(PowerSaveLevel::PERFORMANCE);
+}
+
+MusicPlayer::StreamResult MusicPlayer::StreamOnce(const std::string& url, size_t& offset) {
     esp_http_client_config_t config = {};
     config.url = url.c_str();
-    config.timeout_ms = 5000;
+    config.timeout_ms = 8000;
     config.buffer_size = kHttpBufSize;
     config.buffer_size_tx = 512;
     config.crt_bundle_attach = esp_crt_bundle_attach;
@@ -198,15 +240,26 @@ void MusicPlayer::Playback(const std::string& url) {
     esp_http_client_handle_t client = esp_http_client_init(&config);
     if (client == nullptr) {
         ESP_LOGE(TAG, "failed to init http client");
-        return;
+        return StreamResult::kFatal;
     }
 
-    // esp_http_client_open() does not follow redirects for the manual
-    // open/read flow, so walk the Location chain ourselves. NetEase's
-    // /song/media/outer/url always answers 302 to a CDN host.
+    // Resume where the previous connection died. NetEase's CDN serves byte
+    // ranges, so a dropped socket only costs a few hundred milliseconds of music.
+    const bool resuming = offset > 0;
+    if (resuming) {
+        ESP_LOGI(TAG, "resuming at byte %u", (unsigned)offset);
+    }
+
     int status = 0;
     esp_err_t err = ESP_FAIL;
     for (int hop = 0; hop <= kMaxRedirects; ++hop) {
+        if (resuming) {
+            // Set it on every hop: the redirect target is what actually serves
+            // the bytes, so the header has to survive the URL swap.
+            char range[40];
+            snprintf(range, sizeof(range), "bytes=%u-", (unsigned)offset);
+            esp_http_client_set_header(client, "Range", range);
+        }
         err = esp_http_client_open(client, 0);
         if (err != ESP_OK) {
             ESP_LOGE(TAG, "open failed: %s", esp_err_to_name(err));
@@ -227,63 +280,71 @@ void MusicPlayer::Playback(const std::string& url) {
         break;
     }
 
-    if (err != ESP_OK || status != 200) {
+    if (err != ESP_OK || (status != 200 && status != 206)) {
         ESP_LOGE(TAG, "stream unavailable (http %d)", status);
         esp_http_client_close(client);
         esp_http_client_cleanup(client);
-        return;
+        return StreamResult::kFatal;
     }
 
-    esp_audio_simple_dec_cfg_t dec_cfg = {};
-    dec_cfg.dec_type = ESP_AUDIO_SIMPLE_DEC_TYPE_MP3;
-    dec_cfg.use_frame_dec = false;
-    esp_audio_simple_dec_handle_t decoder = nullptr;
-    auto ret = esp_audio_simple_dec_open(&dec_cfg, &decoder);
-    if (ret != ESP_AUDIO_ERR_OK || decoder == nullptr) {
-        ESP_LOGE(TAG, "mp3 decoder open failed: %d", ret);
-        esp_http_client_close(client);
-        esp_http_client_cleanup(client);
-        return;
+    if (resuming && status == 200) {
+        // The server ignored the Range header and restarted the file. Skip the
+        // part we already played instead of looping the song from the top.
+        ESP_LOGW(TAG, "server ignored Range, skipping %u bytes", (unsigned)offset);
+        size_t remaining = offset;
+        while (remaining > 0 && !stop_requested_.load()) {
+            int n = esp_http_client_read(
+                client, reinterpret_cast<char*>(in_buf_),
+                static_cast<int>(std::min(remaining, static_cast<size_t>(kHttpBufSize))));
+            if (n <= 0) {
+                break;
+            }
+            remaining -= n;
+        }
+        if (remaining > 0) {
+            esp_http_client_close(client);
+            esp_http_client_cleanup(client);
+            return StreamResult::kInterrupted;
+        }
     }
-    decoder_ = decoder;
 
-    in_buf_ = static_cast<uint8_t*>(heap_caps_malloc(kHttpBufSize, MALLOC_CAP_SPIRAM));
-    out_buf_ = static_cast<uint8_t*>(heap_caps_malloc(kOutBufSize, MALLOC_CAP_SPIRAM));
-    if (in_buf_ == nullptr || out_buf_ == nullptr) {
-        ESP_LOGE(TAG, "out of memory for stream buffers");
+    if (!EnsureDecoder()) {
         esp_http_client_close(client);
         esp_http_client_cleanup(client);
-        return;
+        return StreamResult::kFatal;
     }
-    out_buf_size_ = kOutBufSize;
-    stream_rate_ = 0;
 
     size_t filled = 0;
     bool eos = false;
     int empty_reads = 0;
-    size_t total_bytes = 0;
-    const int64_t started_us = esp_timer_get_time();
+    StreamResult result = StreamResult::kInterrupted;
 
     while (!stop_requested_.load()) {
+        KeepRadioAwake();
+
         if (!eos && filled < kHttpBufSize) {
             int n = esp_http_client_read(client, reinterpret_cast<char*>(in_buf_ + filled),
                                          kHttpBufSize - filled);
             if (n < 0) {
                 ESP_LOGW(TAG, "read failed: %d", n);
+                result = StreamResult::kInterrupted;
                 break;
             }
             if (n == 0) {
-                // read() also returns 0 on a socket timeout, so only treat it as
-                // the end of the stream once the transport says it is complete.
-                if (empty_reads >= 3 || esp_http_client_is_complete_data_received(client)) {
+                // A read timeout and the end of the body look the same here.
+                // Only a fully received body is a clean end; three empty reads
+                // in a row mean the connection is done for.
+                if (esp_http_client_is_complete_data_received(client)) {
                     eos = true;
-                } else {
-                    empty_reads++;
+                    result = StreamResult::kEndOfStream;
+                } else if (++empty_reads >= 3) {
+                    result = StreamResult::kInterrupted;
+                    break;
                 }
             } else {
                 empty_reads = 0;
                 filled += n;
-                total_bytes += n;
+                offset += n;
             }
         }
 
@@ -302,7 +363,7 @@ void MusicPlayer::Playback(const std::string& url) {
             out.buffer = out_buf_;
             out.len = out_buf_size_;
 
-            ret = esp_audio_simple_dec_process(decoder, &raw, &out);
+            auto ret = esp_audio_simple_dec_process(decoder_, &raw, &out);
             if (ret == ESP_AUDIO_ERR_BUFF_NOT_ENOUGH && out.needed_size > out_buf_size_) {
                 heap_caps_free(out_buf_);
                 out_buf_size_ = out.needed_size;
@@ -319,6 +380,7 @@ void MusicPlayer::Playback(const std::string& url) {
                 ESP_LOGW(TAG, "decode error %d, dropping the rest of the stream", ret);
                 eos = true;
                 filled = 0;
+                result = StreamResult::kEndOfStream;
                 break;
             }
 
@@ -332,7 +394,7 @@ void MusicPlayer::Playback(const std::string& url) {
 
             if (out.decoded_size > 0) {
                 esp_audio_simple_dec_info_t info = {};
-                if (esp_audio_simple_dec_get_info(decoder, &info) == ESP_AUDIO_ERR_OK) {
+                if (esp_audio_simple_dec_get_info(decoder_, &info) == ESP_AUDIO_ERR_OK) {
                     FeedPcm(out.buffer, out.decoded_size, info.sample_rate, info.channel,
                             info.bits_per_sample);
                 }
@@ -349,15 +411,67 @@ void MusicPlayer::Playback(const std::string& url) {
             // is not mp3. Give up instead of spinning.
             ESP_LOGE(TAG, "no mp3 frame found in %u bytes, aborting",
                      (unsigned)kHttpBufSize);
+            result = StreamResult::kFatal;
             break;
         }
     }
 
-    ESP_LOGI(TAG, "stream done: %u bytes in %lld ms (stopped=%d)", (unsigned)total_bytes,
-             (long long)((esp_timer_get_time() - started_us) / 1000), (int)stop_requested_.load());
-
     esp_http_client_close(client);
     esp_http_client_cleanup(client);
+
+    if (stop_requested_.load()) {
+        return StreamResult::kStopped;
+    }
+    if (eos && result == StreamResult::kInterrupted) {
+        return StreamResult::kEndOfStream;
+    }
+    return result;
+}
+
+void MusicPlayer::Playback(const std::string& url) {
+    ESP_LOGI(TAG, "opening %s", url.c_str());
+    // Do not claim a playback session here: the session flag belongs to server
+    // replies, and the music stream has to yield to them (see FeedPcm()).
+    audio_service_->EnsureOutputEnabled();
+    KeepRadioAwake();
+
+    in_buf_ = static_cast<uint8_t*>(heap_caps_malloc(kHttpBufSize, MALLOC_CAP_SPIRAM));
+    out_buf_ = static_cast<uint8_t*>(heap_caps_malloc(kOutBufSize, MALLOC_CAP_SPIRAM));
+    if (in_buf_ == nullptr || out_buf_ == nullptr) {
+        ESP_LOGE(TAG, "out of memory for stream buffers");
+        return;
+    }
+    out_buf_size_ = kOutBufSize;
+    stream_rate_ = 0;
+    idle_requested_ = false;
+
+    size_t total_bytes = 0;
+    const int64_t started_us = esp_timer_get_time();
+    int reconnects = 0;
+
+    while (!stop_requested_.load()) {
+        StreamResult result = StreamOnce(url, total_bytes);
+        if (result != StreamResult::kInterrupted) {
+            break;
+        }
+        if (++reconnects > kMaxReconnects) {
+            ESP_LOGW(TAG, "stream keeps failing, giving up after %d retries", kMaxReconnects);
+            break;
+        }
+        ESP_LOGW(TAG, "stream interrupted at %u bytes, reconnecting (%d/%d)",
+                 (unsigned)total_bytes, reconnects, kMaxReconnects);
+        // The resume point can land mid-frame; a fresh decoder resyncs on the
+        // next frame header instead of dropping everything as garbage.
+        if (decoder_ != nullptr) {
+            esp_audio_simple_dec_close(decoder_);
+            decoder_ = nullptr;
+        }
+        vTaskDelay(pdMS_TO_TICKS(400));
+    }
+
+    ESP_LOGI(TAG, "stream done: %u bytes in %lld ms (stopped=%d, retries=%d)",
+             (unsigned)total_bytes, (long long)((esp_timer_get_time() - started_us) / 1000),
+             (int)stop_requested_.load(), reconnects);
 }
 
 void MusicPlayer::FeedPcm(const uint8_t* data, size_t size, uint32_t sample_rate, uint8_t channels,
@@ -435,5 +549,13 @@ void MusicPlayer::FeedPcm(const uint8_t* data, size_t size, uint32_t sample_rate
             break;
         }
         offset += n;
+        if (!idle_requested_) {
+            // The reply that announced the song is over, so this is the first
+            // audible chunk. Leave the server's listening session now instead
+            // of letting it time out and say goodbye over the music.
+            idle_requested_ = true;
+            Application::GetInstance().Schedule(
+                []() { Application::GetInstance().EnterIdleForMusicPlayback(); });
+        }
     }
 }

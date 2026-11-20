@@ -923,6 +923,40 @@ void Application::HandleStopListeningEvent() {
     }
 }
 
+void Application::EnterIdleForMusicPlayback() {
+    if (GetDeviceState() != kDeviceStateListening) {
+        return;
+    }
+    // Tell the server we are done talking, then drop to idle locally. Without
+    // this the server keeps the channel in listening mode, waits for speech that
+    // never comes (the microphone is muted by MusicPlayer while it streams) and
+    // finally answers with "先不打扰你了，拜拜" plus a goodbye that tears the
+    // channel down in the middle of the song.
+    ESP_LOGI(TAG, "Music playback running: leaving listening mode");
+    if (protocol_ != nullptr) {
+        protocol_->SendStopListening();
+    }
+    SetDeviceState(kDeviceStateIdle);
+    RefreshMusicDisplay();
+}
+
+void Application::RefreshMusicDisplay() {
+    if (GetDeviceState() != kDeviceStateIdle) {
+        return;
+    }
+    auto display = Board::GetInstance().GetDisplay();
+    auto title = MusicPlayer::GetInstance().GetCurrentTitle();
+    if (MusicPlayer::GetInstance().IsPlaying()) {
+        display->SetStatus("PLAYING");
+        display->ClearChatMessages();
+        display->SetChatMessage("system", title.empty() ? "Playing" : title.c_str());
+    } else {
+        display->SetStatus(Lang::Strings::STANDBY);
+        display->ClearChatMessages();
+        display->SetEmotion("neutral");
+    }
+}
+
 void Application::HandleWakeWordDetectedEvent() {
     if (!protocol_) {
         return;
@@ -1048,7 +1082,16 @@ void Application::HandleStateChangedEvent() {
             // Keep a just-raised network error visible. SetDeviceState(idle)
             // queues STATE_CHANGED after Alert(), and the idle handler would
             // otherwise wipe the status, emotion, and chat message.
-            if (last_error_message_.empty()) {
+            if (MusicPlayer::GetInstance().IsPlaying()) {
+                // The device is not in a conversation, it is playing music: say
+                // so instead of showing a blank standby screen, which made the
+                // playback look like it had ended.
+                const auto title = MusicPlayer::GetInstance().GetCurrentTitle();
+                display->SetStatus("PLAYING");
+                display->ClearChatMessages();
+                display->SetChatMessage("system", title.empty() ? "Playing" : title.c_str());
+                display->SetEmotion("happy");
+            } else if (last_error_message_.empty()) {
                 display->SetStatus(Lang::Strings::STANDBY);
                 display->ClearChatMessages();  // Clear messages first
                 display->SetEmotion(
