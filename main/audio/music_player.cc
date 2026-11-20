@@ -13,8 +13,10 @@
 #include "application.h"
 #include "board.h"
 #include "esp_ae_rate_cvt.h"
+#include "esp_audio_dec_reg.h"
 #include "esp_audio_simple_dec.h"
 #include "esp_audio_simple_dec_default.h"
+#include "esp_mp3_dec.h"
 
 #define TAG "MusicPlayer"
 
@@ -66,8 +68,26 @@ void MusicPlayer::Initialize(AudioService* audio_service) {
     audio_service_ = audio_service;
     request_sem_ = xSemaphoreCreateBinary();
 
-    // Populates the simple decoder registry (MP3 parser + MP3 decoder).
+    // Populates the simple decoder registry (container parsers) and, depending
+    // on Kconfig, the MP3 decoder as well.
     esp_audio_simple_dec_register_default();
+    // esp_audio_codec is shipped as a single prebuilt library, but its frame
+    // decoders are only entered into the registry when the matching Kconfig
+    // option (CONFIG_AUDIO_DECODER_MP3_SUPPORT) is set at build time. This
+    // firmware builds without it, so register MP3 explicitly -- otherwise
+    // esp_audio_simple_dec_open() fails with "Decoder MP3 ... not registered".
+    if (esp_audio_dec_get_ops(ESP_AUDIO_TYPE_MP3) == nullptr) {
+        esp_audio_err_t err = esp_mp3_dec_register();
+        if (err == ESP_AUDIO_ERR_OK) {
+            decoder_ready_ = true;
+            ESP_LOGI(TAG, "mp3 decoder registered explicitly (Kconfig was off)");
+        } else {
+            ESP_LOGE(TAG, "mp3 decoder registration failed: %d", (int)err);
+        }
+    } else {
+        decoder_ready_ = true;
+        ESP_LOGI(TAG, "mp3 decoder already registered by Kconfig");
+    }
 
     s_task_stack = static_cast<StackType_t*>(
         heap_caps_malloc(kTaskStackBytes, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
@@ -89,6 +109,11 @@ std::string MusicPlayer::GetCurrentUrl() const {
 
 bool MusicPlayer::Play(const std::string& url) {
     if (audio_service_ == nullptr || request_sem_ == nullptr || url.empty()) {
+        ESP_LOGW(TAG, "play rejected: player not initialized or empty url");
+        return false;
+    }
+    if (!decoder_ready_.load()) {
+        ESP_LOGE(TAG, "play rejected: no mp3 decoder registered");
         return false;
     }
     {

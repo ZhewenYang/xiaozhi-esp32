@@ -67,6 +67,9 @@ private:
     std::string current_url_;
     std::atomic<bool> stop_requested_{false};
     std::atomic<bool> playing_{false};
+    // False when no MP3 decoder could be registered (see Initialize); Play()
+    // then fails fast instead of streaming into a dead decoder.
+    std::atomic<bool> decoder_ready_{false};
 
     // Stream state, only touched by the worker task.
     void* decoder_ = nullptr;

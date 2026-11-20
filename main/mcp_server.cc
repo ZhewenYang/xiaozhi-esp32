@@ -65,22 +65,28 @@ void McpServer::AddCommonTools() {
             });
 
     AddTool("self.audio_speaker.play_url",
-            "Play an online audio file (mp3) on the speaker. Call this only with a full http(s) "
-            "URL of an audio file, typically returned by a separate music/MCP tool. Do not call "
-            "it with a song name, a song id or a web page URL. The tool returns immediately while "
-            "the device streams the audio in the background, so tell the user that playback has "
-            "started instead of waiting.\n"
+            "Play an online audio file (mp3) ON THIS DEVICE'S BUILT-IN SPEAKER. This device has a "
+            "real speaker and streams the audio by itself. Whenever the user asks to play a song, "
+            "music or any audio, and a tool (including a music/MCP tool) has returned an audio URL, "
+            "call this tool with that URL immediately. Never tell the user to use another player and "
+            "never say the device cannot play audio -- this tool is exactly how it plays.\n"
             "Args:\n"
-            "  `url`: The full http(s) URL of the audio file to play.\n"
+            "  `url`: The full http(s) URL of an audio file (redirects are followed automatically).\n"
             "Return:\n"
-            "  A JSON object that reports whether playback started.",
+            "  JSON `{\"ok\":true}` when streaming started, or `{\"ok\":false,\"error\":...}` when it "
+            "did not. Only tell the user playback started when ok is true.",
             PropertyList({Property("url", kPropertyTypeString)}),
             [](const PropertyList& properties) -> ReturnValue {
                 auto url = properties["url"].value<std::string>();
                 if (url.rfind("http://", 0) != 0 && url.rfind("https://", 0) != 0) {
-                    return false;
+                    return std::string(
+                        "{\"ok\":false,\"error\":\"url must start with http:// or https://\"}");
                 }
-                return MusicPlayer::GetInstance().Play(url);
+                if (!MusicPlayer::GetInstance().Play(url)) {
+                    return std::string(
+                        "{\"ok\":false,\"error\":\"player not ready on this device, check device log\"}");
+                }
+                return std::string("{\"ok\":true,\"note\":\"streaming on the device speaker\"}");
             });
 
     AddTool("self.audio_speaker.stop_music",
