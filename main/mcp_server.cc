@@ -21,6 +21,7 @@
 #include "display.h"
 #include "lvgl_image.h"
 #include "lvgl_theme.h"
+#include "music_player.h"
 #include "settings.h"
 
 #define TAG "MCP"
@@ -60,6 +61,32 @@ void McpServer::AddCommonTools() {
             [&board](const PropertyList& properties) -> ReturnValue {
                 auto codec = board.GetAudioCodec();
                 codec->SetOutputVolume(properties["volume"].value<int>());
+                return true;
+            });
+
+    AddTool("self.audio_speaker.play_url",
+            "Play an online audio file (mp3) on the speaker. Call this only with a full http(s) "
+            "URL of an audio file, typically returned by a separate music/MCP tool. Do not call "
+            "it with a song name, a song id or a web page URL. The tool returns immediately while "
+            "the device streams the audio in the background, so tell the user that playback has "
+            "started instead of waiting.\n"
+            "Args:\n"
+            "  `url`: The full http(s) URL of the audio file to play.\n"
+            "Return:\n"
+            "  A JSON object that reports whether playback started.",
+            PropertyList({Property("url", kPropertyTypeString)}),
+            [](const PropertyList& properties) -> ReturnValue {
+                auto url = properties["url"].value<std::string>();
+                if (url.rfind("http://", 0) != 0 && url.rfind("https://", 0) != 0) {
+                    return false;
+                }
+                return MusicPlayer::GetInstance().Play(url);
+            });
+
+    AddTool("self.audio_speaker.stop_music",
+            "Stop the music that is currently playing on the speaker.",
+            PropertyList(), [](const PropertyList&) -> ReturnValue {
+                MusicPlayer::GetInstance().Stop();
                 return true;
             });
 

@@ -785,8 +785,32 @@ void AudioService::PlaySound(const std::string_view& ogg) {
     demuxer->Process(buf, size);
 }
 
-bool AudioService::IsIdle() {
-    std::lock_guard<std::mutex> lock(audio_queue_mutex_);
+bool AudioService::EnqueuePlaybackPcm(std::vector<int16_t>&& pcm) {
+    if (pcm.empty()) {
+        return true;
+    }
+    std::unique_lock<std::mutex> lock(audio_queue_mutex_);
+    // Wait for room instead of dropping: music must not lose samples. The
+    // output task drains one task at a time, so this paces the caller to
+    // realtime playback.
+    audio_queue_cv_.wait(lock, [this]() {
+        return service_stopped_.load() ||
+               audio_playback_queue_.size() < MAX_PLAYBACK_TASKS_IN_QUEUE;
+    });
+    if (service_stopped_.load()) {
+        return false;
+    }
+    AudioTask task;
+    task.type = kAudioTaskTypeDecodeToPlaybackQueue;
+    task.pcm = std::move(pcm);
+    if (!audio_playback_queue_.push_back(std::move(task))) {
+        return false;
+    }
+    audio_queue_cv_.notify_all();
+    return true;
+}
+
+bool AudioService::IsIdle() {    std::lock_guard<std::mutex> lock(audio_queue_mutex_);
     return audio_encode_queue_.empty() && IsPlaybackDrainedLocked() && audio_testing_queue_.empty();
 }
 

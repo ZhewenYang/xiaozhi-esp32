@@ -7,6 +7,7 @@
 #include "display.h"
 #include "mcp_server.h"
 #include "mqtt_protocol.h"
+#include "music_player.h"
 #include "settings.h"
 #include "system_info.h"
 #include "text_glyph_payload.h"
@@ -97,6 +98,20 @@ void Application::Initialize() {
     state_machine_.AddStateChangeListener([this](DeviceState old_state, DeviceState new_state) {
         xEventGroupSetBits(event_group_, MAIN_EVENT_STATE_CHANGED);
     });
+
+    // Music playback (self.audio_speaker.play_url) owns the speaker while it
+    // runs. Any transition away from idle means the user woke the device or a
+    // reply started, so the stream has to stop immediately: otherwise the ASR
+    // would hear the music and the TTS would be drowned out.
+    state_machine_.AddStateChangeListener([](DeviceState old_state, DeviceState new_state) {
+        if (new_state != kDeviceStateIdle && MusicPlayer::GetInstance().IsPlaying()) {
+            ESP_LOGI(TAG, "Music playback stopped: device state -> %d", static_cast<int>(new_state));
+            MusicPlayer::GetInstance().Stop();
+        }
+    });
+
+    // The player feeds decoded PCM into the audio service playback path.
+    MusicPlayer::GetInstance().Initialize(&audio_service_);
 
     // Start the clock timer to update the status bar
     esp_timer_start_periodic(clock_timer_handle_, 1000000);

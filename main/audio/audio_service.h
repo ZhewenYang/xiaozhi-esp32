@@ -150,6 +150,11 @@ public:
     bool PushPacketToDecodeQueue(std::unique_ptr<AudioStreamPacket> packet, bool wait = false);
     std::unique_ptr<AudioStreamPacket> PopPacketFromSendQueue();
     void PlaySound(const std::string_view& sound);
+    // Feeds mono 16-bit PCM (already resampled to the codec output rate) into
+    // the playback queue, i.e. the same path TTS uses. Blocks while the queue
+    // is full so the caller is throttled to realtime. Returns false when the
+    // service is stopping or the queue rejected the task.
+    bool EnqueuePlaybackPcm(std::vector<int16_t>&& pcm);
     bool ReadAudioData(std::vector<int16_t>& data, int sample_rate, int samples);
     void ResetDecoder();
     void SetModelsList(srmodel_list_t* models_list);
