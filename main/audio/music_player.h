@@ -3,6 +3,7 @@
 
 #include <atomic>
 #include <cstddef>
+#include <deque>
 #include <mutex>
 #include <string>
 #include <vector>
@@ -39,9 +40,23 @@ public:
     /** Must be called once after AudioService::Start(). */
     void Initialize(AudioService* audio_service);
 
+    /** One stream to play. `title` is only used for the screen. */
+    struct Track {
+        std::string url;
+        std::string title;
+    };
+
     /** Stops the current stream (if any) and starts `url`. Non-blocking.
      *  `title` is only used for the screen ("正在播放 ..."). */
     bool Play(const std::string& url, const std::string& title = "");
+
+    /** Replaces the queue with `tracks` and starts playing the first one.
+     *  The rest follow back to back until the queue is empty or Stop() is
+     *  called. Non-blocking. */
+    bool PlayQueue(std::vector<Track> tracks);
+
+    /** Number of tracks still queued (not counting the one playing). */
+    size_t GetQueueLength() const;
 
     /** Asks the worker to stop. Returns immediately; the worker exits within
      *  a few hundred milliseconds. */
@@ -61,6 +76,9 @@ private:
     static void TaskEntry(void* arg);
     void TaskLoop();
     void Playback(const std::string& url);
+    // Pops the next track; false when the queue is empty.
+    bool NextTrack(Track* out);
+    void ClearQueue();
     // Opens `url` at `offset`, streams and decodes until the body ends, the
     // socket dies, or Stop() is called. `offset` is advanced by every byte read.
     StreamResult StreamOnce(const std::string& url, size_t& offset);
@@ -73,10 +91,12 @@ private:
     AudioService* audio_service_ = nullptr;
     SemaphoreHandle_t request_sem_ = nullptr;
     mutable std::mutex url_mutex_;
-    std::string pending_url_;
     std::string current_url_;
     std::string current_title_;
-    std::string pending_title_;
+    // Tracks waiting to be played, filled by PlayQueue()/Play() and drained by
+    // the worker. Guarded by queue_mutex_ so the MCP handler never blocks.
+    std::deque<Track> queue_;
+    mutable std::mutex queue_mutex_;
     std::atomic<bool> stop_requested_{false};
     std::atomic<bool> playing_{false};
     // False when no MP3 decoder could be registered (see Initialize); Play()

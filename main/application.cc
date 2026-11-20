@@ -927,17 +927,30 @@ void Application::EnterIdleForMusicPlayback() {
     if (GetDeviceState() != kDeviceStateListening) {
         return;
     }
-    // Tell the server we are done talking, then drop to idle locally. Without
-    // this the server keeps the channel in listening mode, waits for speech that
-    // never comes (the microphone is muted by MusicPlayer while it streams) and
-    // finally answers with "先不打扰你了，拜拜" plus a goodbye that tears the
-    // channel down in the middle of the song.
-    ESP_LOGI(TAG, "Music playback running: leaving listening mode");
-    if (protocol_ != nullptr) {
-        protocol_->SendStopListening();
+    // End this server conversation for good, do not just stop listening. A
+    // plain SendStopListening leaves the session open on the server, which then
+    // waits ~70 s for speech that never comes (the microphone is muted while
+    // music streams) and answers with "看来你现在忙，那我就先不打扰啦，拜拜"
+    // followed by a goodbye. That TTS used to arrive as a new speaking state
+    // and wiped the music playback queue.
+    //
+    // Closing the audio channel tears down the session server-side, so no
+    // further TTS can reach the device while the song runs. The music itself is
+    // an independent HTTP stream and keeps playing. The user starts a new
+    // conversation with the wake word when the music is over.
+    ESP_LOGI(TAG, "Music playback running: closing the conversation channel");
+    if (protocol_ != nullptr && protocol_->IsAudioChannelOpened()) {
+        protocol_->CloseAudioChannel(false);
     }
+    // Closing the channel drops the radio to modem sleep, and a sleeping
+    // station loses a sustained HTTP stream (ENOTCONN mid-song). MusicPlayer
+    // re-asserts this every couple of seconds, but do it before the first gap.
+    Board::GetInstance().SetPowerSaveLevel(PowerSaveLevel::PERFORMANCE);
     SetDeviceState(kDeviceStateIdle);
     RefreshMusicDisplay();
+    // OnAudioChannelClosed schedules a screen clear right behind us; re-apply
+    // the "PLAYING <title>" banner once that has run (scheduled tasks are FIFO).
+    Schedule([this]() { RefreshMusicDisplay(); });
 }
 
 void Application::RefreshMusicDisplay() {
@@ -1132,7 +1145,14 @@ void Application::HandleStateChangedEvent() {
                 // Only AFE wake word can be detected in speaking mode
                 audio_service_.EnableWakeWordDetection(audio_service_.IsAfeWakeWord());
             }
-            audio_service_.ResetDecoder();
+            if (MusicPlayer::GetInstance().IsPlaying()) {
+                // Never flush the playback queue while music streams: the
+                // decoded PCM of the song sits in that very queue, and a stray
+                // server reply would cut the track mid-note.
+                ESP_LOGW(TAG, "TTS arrived during music playback, keeping the queue");
+            } else {
+                audio_service_.ResetDecoder();
+            }
             break;
         case kDeviceStateNotifying:
             display->SetStatus(Lang::Strings::SPEAKING);

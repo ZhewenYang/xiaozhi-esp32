@@ -108,7 +108,11 @@ std::string MusicPlayer::GetCurrentTitle() const {
 }
 
 bool MusicPlayer::Play(const std::string& url, const std::string& title) {
-    if (audio_service_ == nullptr || request_sem_ == nullptr || url.empty()) {
+    return PlayQueue({Track{url, title}});
+}
+
+bool MusicPlayer::PlayQueue(std::vector<Track> tracks) {
+    if (audio_service_ == nullptr || request_sem_ == nullptr || tracks.empty()) {
         ESP_LOGW(TAG, "play rejected: player not initialized or empty url");
         return false;
     }
@@ -116,15 +120,44 @@ bool MusicPlayer::Play(const std::string& url, const std::string& title) {
         ESP_LOGE(TAG, "play rejected: no mp3 decoder registered");
         return false;
     }
-    {
-        std::lock_guard<std::mutex> lock(url_mutex_);
-        pending_url_ = url;
-        pending_title_ = title;
+    for (const auto& track : tracks) {
+        if (track.url.rfind("http://", 0) != 0 && track.url.rfind("https://", 0) != 0) {
+            ESP_LOGE(TAG, "play rejected: bad url in queue");
+            return false;
+        }
     }
-    // Interrupt whatever is running, then hand the new URL to the worker.
+    {
+        std::lock_guard<std::mutex> lock(queue_mutex_);
+        queue_.clear();
+        for (auto& track : tracks) {
+            queue_.push_back(std::move(track));
+        }
+    }
+    ESP_LOGI(TAG, "queue set: %u track(s)", (unsigned)tracks.size());
+    // Interrupt whatever is running; the worker drains the new queue.
     stop_requested_ = true;
     xSemaphoreGive(request_sem_);
     return true;
+}
+
+size_t MusicPlayer::GetQueueLength() const {
+    std::lock_guard<std::mutex> lock(queue_mutex_);
+    return queue_.size();
+}
+
+bool MusicPlayer::NextTrack(Track* out) {
+    std::lock_guard<std::mutex> lock(queue_mutex_);
+    if (queue_.empty()) {
+        return false;
+    }
+    *out = std::move(queue_.front());
+    queue_.pop_front();
+    return true;
+}
+
+void MusicPlayer::ClearQueue() {
+    std::lock_guard<std::mutex> lock(queue_mutex_);
+    queue_.clear();
 }
 
 void MusicPlayer::Stop() {
@@ -132,6 +165,7 @@ void MusicPlayer::Stop() {
         return;
     }
     stop_requested_ = true;
+    ClearQueue();
     // Drop a request that has been queued but not picked up yet.
     while (xSemaphoreTake(request_sem_, 0) == pdTRUE) {
     }
@@ -144,23 +178,42 @@ void MusicPlayer::TaskLoop() {
         if (xSemaphoreTake(request_sem_, portMAX_DELAY) != pdTRUE) {
             continue;
         }
-        std::string url;
-        {
-            std::lock_guard<std::mutex> lock(url_mutex_);
-            url = pending_url_;
-            pending_url_.clear();
-            current_url_ = url;
-            current_title_ = pending_title_;
-            pending_title_.clear();
+        // One "leave the conversation" hand-off per queue, not per track.
+        idle_requested_ = false;
+        while (true) {
+            Track track;
+            if (!NextTrack(&track)) {
+                break;
+            }
+            // A PlayQueue() call during the previous track leaves
+            // stop_requested_ set; clearing it here starts the next track.
+            stop_requested_ = false;
+            {
+                std::lock_guard<std::mutex> lock(url_mutex_);
+                current_url_ = track.url;
+                current_title_ = track.title;
+            }
+            playing_ = true;
+            // Show the new title before the first sample of the track, so a
+            // multi-track queue updates the screen at every transition.
+            Application::GetInstance().Schedule(
+                []() { Application::GetInstance().RefreshMusicDisplay(); });
+            Playback(track.url);
+            playing_ = false;
+            ReleaseStream();
+            {
+                std::lock_guard<std::mutex> lock(url_mutex_);
+                current_url_.clear();
+                current_title_.clear();
+            }
+            ESP_LOGI(TAG, "track finished, %u track(s) left", (unsigned)GetQueueLength());
+            if (stop_requested_.load()) {
+                // Either Stop() (queue cleared, loop exits next) or a fresh
+                // queue that must keep playing. Re-reading is correct for both.
+                ESP_LOGI(TAG, "playback interrupted, re-reading the queue");
+            }
         }
-        if (url.empty()) {
-            continue;
-        }
-        stop_requested_ = false;
-        playing_ = true;
-        Playback(url);
-        playing_ = false;
-        ReleaseStream();
+        ClearQueue();
         {
             std::lock_guard<std::mutex> lock(url_mutex_);
             current_url_.clear();
@@ -443,7 +496,6 @@ void MusicPlayer::Playback(const std::string& url) {
     }
     out_buf_size_ = kOutBufSize;
     stream_rate_ = 0;
-    idle_requested_ = false;
 
     size_t total_bytes = 0;
     const int64_t started_us = esp_timer_get_time();

@@ -10,11 +10,14 @@
 #include <esp_timer.h>
 #include <algorithm>
 #include <chrono>
+#include <cstdio>
 #include <cstring>
 #include <iterator>
 #include <mutex>
 #include <optional>
+#include <string>
 #include <thread>
+#include <vector>
 
 #include "application.h"
 #include "board.h"
@@ -65,32 +68,88 @@ void McpServer::AddCommonTools() {
             });
 
     AddTool("self.audio_speaker.play_url",
-            "Play an online audio file (mp3) ON THIS DEVICE'S BUILT-IN SPEAKER. This device has a "
+            "Play online audio file(s) (mp3) ON THIS DEVICE'S BUILT-IN SPEAKER. This device has a "
             "real speaker and streams the audio by itself. Whenever the user asks to play a song, "
-            "music or any audio, and a tool (including a music/MCP tool) has returned an audio URL, "
-            "call this tool with that URL immediately. Never tell the user to use another player and "
-            "never say the device cannot play audio -- this tool is exactly how it plays.\n"
+            "music, a playlist or any audio, and a tool (including a music/MCP tool) has returned "
+            "audio URL(s), call this tool with them immediately. Never tell the user to use "
+            "another player and never say the device cannot play audio -- this tool is exactly "
+            "how it plays.\n"
             "Args:\n"
-            "  `url`: The full http(s) URL of an audio file (redirects are followed automatically).\n"
+            "  `url`: The full http(s) URL of one audio file (redirects are followed "
+            "automatically).\n"
             "  `title`: The song name and artist as returned by the music tool, e.g. "
             "\"李玲玉 - 天竺少女\". Shown on the device screen while it plays.\n"
+            "  `urls`: Optional. Several URLs separated by newlines (\\n). The device plays them "
+            "back to back, in order, as one queue. Use this for playlists or when the user asked "
+            "for multiple songs; pass every URL at once instead of calling this tool repeatedly.\n"
+            "  `titles`: Optional. Titles matching `urls`, also newline separated.\n"
             "Return:\n"
-            "  JSON `{\"ok\":true}` when streaming started, or `{\"ok\":false,\"error\":...}` when it "
-            "did not. Only tell the user playback started when ok is true.",
-            PropertyList({Property("url", kPropertyTypeString),
-                          Property("title", kPropertyTypeString, "")}),
+            "  JSON `{\"ok\":true}` when streaming started, or `{\"ok\":false,\"error\":...}` when "
+            "it did not. Only tell the user playback started when ok is true.",
+            PropertyList({Property("url", kPropertyTypeString, ""),
+                          Property("title", kPropertyTypeString, ""),
+                          Property("urls", kPropertyTypeString, ""),
+                          Property("titles", kPropertyTypeString, "")}),
             [](const PropertyList& properties) -> ReturnValue {
                 auto url = properties["url"].value<std::string>();
                 auto title = properties["title"].value<std::string>();
-                if (url.rfind("http://", 0) != 0 && url.rfind("https://", 0) != 0) {
-                    return std::string(
-                        "{\"ok\":false,\"error\":\"url must start with http:// or https://\"}");
+                auto urls = properties["urls"].value<std::string>();
+                auto titles = properties["titles"].value<std::string>();
+
+                auto split_lines = [](const std::string& text) {
+                    std::vector<std::string> lines;
+                    size_t start = 0;
+                    while (start <= text.size()) {
+                        size_t end = text.find('\n', start);
+                        if (end == std::string::npos) {
+                            end = text.size();
+                        }
+                        std::string line = text.substr(start, end - start);
+                        // Tolerate "\r" and stray spaces from JSON payloads.
+                        while (!line.empty() && (line.back() == '\r' || line.back() == ' ')) {
+                            line.pop_back();
+                        }
+                        size_t first = line.find_first_not_of(' ');
+                        if (first != std::string::npos) {
+                            lines.push_back(line.substr(first));
+                        }
+                        start = end + 1;
+                    }
+                    return lines;
+                };
+
+                std::vector<std::string> queue_urls = split_lines(urls);
+                if (queue_urls.empty() && !url.empty()) {
+                    queue_urls.push_back(url);
                 }
-                if (!MusicPlayer::GetInstance().Play(url, title)) {
-                    return std::string(
-                        "{\"ok\":false,\"error\":\"player not ready on this device, check device log\"}");
+                if (queue_urls.empty()) {
+                    return std::string("{\"ok\":false,\"error\":\"url or urls is required\"}");
                 }
-                return std::string("{\"ok\":true,\"note\":\"streaming on the device speaker\"}");
+                auto queue_titles = split_lines(titles);
+                std::vector<MusicPlayer::Track> tracks;
+                tracks.reserve(queue_urls.size());
+                for (size_t i = 0; i < queue_urls.size(); ++i) {
+                    const auto& track_url = queue_urls[i];
+                    if (track_url.rfind("http://", 0) != 0 &&
+                        track_url.rfind("https://", 0) != 0) {
+                        return std::string(
+                            "{\"ok\":false,\"error\":\"every url must start with http:// or "
+                            "https://\"}");
+                    }
+                    tracks.push_back(
+                        MusicPlayer::Track{track_url, i < queue_titles.size() ? queue_titles[i]
+                                                                             : std::string()});
+                }
+                if (!MusicPlayer::GetInstance().PlayQueue(std::move(tracks))) {
+                    return std::string(
+                        "{\"ok\":false,\"error\":\"player not ready on this device, check device "
+                        "log\"}");
+                }
+                char note[96];
+                snprintf(note, sizeof(note),
+                         "{\"ok\":true,\"tracks\":%u,\"note\":\"streaming on the device speaker\"}",
+                         (unsigned)queue_urls.size());
+                return std::string(note);
             });
 
     AddTool("self.audio_speaker.stop_music",
