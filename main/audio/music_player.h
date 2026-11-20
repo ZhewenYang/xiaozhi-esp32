@@ -62,7 +62,7 @@ private:
 
     AudioService* audio_service_ = nullptr;
     SemaphoreHandle_t request_sem_ = nullptr;
-    std::mutex url_mutex_;
+    mutable std::mutex url_mutex_;
     std::string pending_url_;
     std::string current_url_;
     std::atomic<bool> stop_requested_{false};
