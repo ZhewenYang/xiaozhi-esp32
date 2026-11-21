@@ -8,6 +8,10 @@ on:
         description: 'Build only this board directory (e.g. bread-compact-wifi-s3cam); empty = full matrix'
         required: false
         type: string
+      wake_word:
+        description: 'ESP-SR wake word model, e.g. wn9_nihaoxiaoyi_tts2; empty = project default'
+        required: false
+        type: string
   push:
     branches:
       - main
@@ -99,11 +103,15 @@ jobs:
           BOARD: ${{ matrix.board }}
           VARIANT: ${{ matrix.name }}
           BUILD_OPTIONS_JSON: ${{ toJSON(matrix.ci_build_options) }}
+          WAKE_WORD: ${{ inputs.wake_word }}
         run: |
           source "$IDF_PATH/export.sh"
           OPTIONS=()
           if [[ "$BUILD_OPTIONS_JSON" != "null" && -n "$BUILD_OPTIONS_JSON" ]]; then
             OPTIONS+=(--build-options-json "$BUILD_OPTIONS_JSON")
+          fi
+          if [[ -n "$WAKE_WORD" ]]; then
+            OPTIONS+=(--wake-word "$WAKE_WORD")
           fi
           python scripts/build.py "$BOARD" --name "$VARIANT" "${OPTIONS[@]}"
 
