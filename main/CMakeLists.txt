@@ -825,7 +825,10 @@ elseif(CONFIG_BOARD_TYPE_BREAD_COMPACT_WIFI_CAM)
     set(BOARD_DIR "bread-compact-wifi-s3cam")
     set(BUILTIN_TEXT_FONT font_noto_sans_basic_16_4)
     set(BUILTIN_ICON_FONT font_material_symbols_16_4)
-    set(DEFAULT_EMOJI_COLLECTION noto-color-emoji_64)
+    # 这台设备出厂/服务端下发的 assets 用的是 otto-gif 动态表情包（21 个 GIF，
+    # 约 2.2MB）。默认的 noto-color-emoji_64 是 21 张 64x61 静态 PNG，烧进去后
+    # 屏幕上的表情会全部变成静态小图，看起来就像"表情没有了"。
+    set(DEFAULT_EMOJI_COLLECTION otto-gif)
 elseif(CONFIG_BOARD_TYPE_JIUCHUAN)
     set(BOARD_DIR "jiuchuan-s3")
     set(BUILTIN_TEXT_FONT font_noto_sans_basic_20_4)
