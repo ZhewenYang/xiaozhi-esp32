@@ -19,7 +19,9 @@ CONFIG_MBEDTLS_DYNAMIC_FREE_CONFIG_DATA=y
 CONFIG_ESP32S3_INSTRUCTION_CACHE_32KB=y
 CONFIG_ESP32S3_DATA_CACHE_LINE_64B=y
 
-CONFIG_SR_WN_WN9_NIHAOXIAOZHI_TTS=y
+# 唤醒词：你好小益（原先为你好小智）。模型名必须与 esp-sr 的 Kconfig 符号一致，
+# 改动后 assets 分区（0x800000）里的 srmodels.bin 会重新打包，只烧 app 不生效。
+CONFIG_SR_WN_WN9_NIHAOXIAOYI_TTS2=y
 
 # Use an internal DMA bounce buffer so incomplete RGB frames can be rejected.
 # Limit its size to preserve internal heap for AFE and WakeNet.
