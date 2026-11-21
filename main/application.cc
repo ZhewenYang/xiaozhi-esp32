@@ -1061,6 +1061,9 @@ void Application::ContinueWakeWordInvoke(const std::string& wake_word) {
     }
 
     ESP_LOGI(TAG, "Wake word detected: %s", wake_word.c_str());
+    // Boards with moving parts greet here, at the same moment the assistant
+    // starts talking, so the gesture and the voice line up.
+    board.OnWakeWord();
 #if CONFIG_SEND_WAKE_WORD_DATA
     // Encode and send the wake word data to the server
     while (auto packet = audio_service_.PopWakeWordPacket()) {

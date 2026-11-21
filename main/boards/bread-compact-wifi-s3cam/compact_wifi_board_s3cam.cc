@@ -213,6 +213,13 @@ public:
     virtual Camera* GetCamera() override {
         return camera_;
     }
+
+    // Arm demo mode: wave at the user while the assistant says hello.
+    virtual void OnWakeWord() override {
+        if (head_controller_ != nullptr) {
+            head_controller_->WaveOnWake();
+        }
+    }
 };
 
 DECLARE_BOARD(CompactWifiBoardS3Cam);

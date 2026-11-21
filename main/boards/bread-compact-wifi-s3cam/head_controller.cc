@@ -3,9 +3,10 @@
 
 #include <algorithm>
 #include <cstdio>
+#include <cstdlib>
 #include <esp_log.h>
 
-#define TAG "HeadControl"
+#define TAG "ArmControl"
 
 HeadController::HeadController(uart_port_t uart_num, gpio_num_t tx_pin) : uart_num_(uart_num) {
     uart_config_t config = {};
@@ -20,18 +21,28 @@ HeadController::HeadController(uart_port_t uart_num, gpio_num_t tx_pin) : uart_n
     ESP_ERROR_CHECK(uart_set_pin(uart_num_, tx_pin, UART_PIN_NO_CHANGE, UART_PIN_NO_CHANGE,
                                  UART_PIN_NO_CHANGE));
     ESP_ERROR_CHECK(uart_driver_install(uart_num_, 512, 0, 0, nullptr, 0));
-    ESP_LOGI(TAG, "head link ready: TX=GPIO%d @115200 8N1", (int)tx_pin);
+    ESP_LOGI(TAG, "arm link ready: TX=GPIO%d @115200 8N1", (int)tx_pin);
 
     queue_ = xQueueCreate(8, sizeof(Command));
     if (queue_ == nullptr) {
-        ESP_LOGE(TAG, "failed to create command queue; head tools disabled");
+        ESP_LOGE(TAG, "failed to create command queue; arm tools disabled");
         return;
     }
-    xTaskCreate(TaskEntry, "head_ctrl", 3072, this, 4, nullptr);
+    xTaskCreate(TaskEntry, "arm_ctrl", 3072, this, 4, nullptr);
 
     RegisterTools();
-    // Start from a known pose so the head does not stay wherever it was left.
-    Enqueue(Action::kCenter, kHomeAngle, kHomeAngle, 1);
+
+    // Both servos are wherever the previous run left them. Send the hanging pose
+    // once so every ramp below starts from an angle the firmware knows about.
+    left_ = kArmDown;
+    right_ = kArmDown;
+    SendAngles();
+}
+
+void HeadController::WaveOnWake() {
+    if (!Enqueue(Action::kWave, kArmDown, kArmDown, 3)) {
+        ESP_LOGW(TAG, "wave dropped, queue full");
+    }
 }
 
 void HeadController::TaskEntry(void* arg) {
@@ -39,6 +50,12 @@ void HeadController::TaskEntry(void* arg) {
 }
 
 void HeadController::Run() {
+    // Repeat the initial pose once the sub-board has had time to boot: the very
+    // first line sent from the constructor can be lost while it is still
+    // starting up, which would leave the arms at 90 degrees.
+    vTaskDelay(pdMS_TO_TICKS(200));
+    SendAngles();
+
     Command cmd = {};
     for (;;) {
         if (xQueueReceive(queue_, &cmd, portMAX_DELAY) != pdTRUE) {
@@ -52,14 +69,14 @@ void HeadController::SendLine(const std::string& line) {
     std::string payload = line;
     payload.push_back('\n');
     uart_write_bytes(uart_num_, payload.data(), payload.size());
-    ESP_LOGI(TAG, "-> %s", line.c_str());
+    ESP_LOGD(TAG, "-> %s", line.c_str());
 }
 
 void HeadController::SendAngles() {
     char buf[16];
-    snprintf(buf, sizeof(buf), "shake=%d", pan_);
+    snprintf(buf, sizeof(buf), "nod=%d", left_);     // left arm
     SendLine(buf);
-    snprintf(buf, sizeof(buf), "nod=%d", tilt_);
+    snprintf(buf, sizeof(buf), "shake=%d", right_);  // right arm
     SendLine(buf);
 }
 
@@ -76,49 +93,91 @@ bool HeadController::Enqueue(Action action, int pan, int tilt, int count) {
     return xQueueSend(queue_, &cmd, 0) == pdTRUE;
 }
 
+// Move both arms to the targets in small steps. The sub-board has no speed
+// control, so the pacing happens here: one UART line pair every step_ms, which
+// at 115200 baud costs well under a millisecond each.
+void HeadController::RampTo(int left_target, int right_target, int step_deg, int step_ms) {
+    left_target = std::clamp(left_target, kAngleMin, kAngleMax);
+    right_target = std::clamp(right_target, kAngleMin, kAngleMax);
+
+    const int from_left = left_;
+    const int from_right = right_;
+    const int delta_left = left_target - from_left;
+    const int delta_right = right_target - from_right;
+    const int distance = std::max(std::abs(delta_left), std::abs(delta_right));
+    if (distance == 0) {
+        return;
+    }
+
+    const int steps = (distance + step_deg - 1) / step_deg;
+    for (int i = 1; i <= steps; ++i) {
+        left_ = from_left + delta_left * i / steps;
+        right_ = from_right + delta_right * i / steps;
+        SendAngles();
+        if (i < steps) {
+            vTaskDelay(pdMS_TO_TICKS(step_ms));
+        }
+    }
+    left_ = left_target;
+    right_ = right_target;
+    SendAngles();
+}
+
+// "Dance": the arms trade places, one beat per RampTo call, then both drop home.
+void HeadController::Dance(int count) {
+    for (int i = 0; i < count; ++i) {
+        if ((i % 2) == 0) {
+            RampTo(kDanceHigh, kDanceLow, kDanceStepDeg, kDanceStepMs);
+        } else {
+            RampTo(kDanceLow, kDanceHigh, kDanceStepDeg, kDanceStepMs);
+        }
+    }
+    RampTo(kArmDown, kArmDown, kSlowStepDeg, kSlowStepMs);
+}
+
+// "Hello": lift the right arm, wave it count times, drop it again.
+void HeadController::Wave(int count) {
+    RampTo(left_, kWaveHigh, kWaveStepDeg, kWaveStepMs);
+    for (int i = 0; i < count; ++i) {
+        RampTo(left_, kWaveLow, kWaveStepDeg, kWaveStepMs);
+        RampTo(left_, kWaveHigh, kWaveStepDeg, kWaveStepMs);
+    }
+    RampTo(left_, kArmDown, kWaveStepDeg, kWaveStepMs);
+}
+
 void HeadController::Execute(const Command& cmd) {
     switch (cmd.action) {
-        case Action::kCenter:
-            pan_ = kHomeAngle;
-            tilt_ = kHomeAngle;
-            SendLine("center");
+        case Action::kHome:
+            RampTo(kArmDown, kArmDown, kSlowStepDeg, kSlowStepMs);
             break;
 
-        case Action::kLook:
-            pan_ = cmd.pan;
-            tilt_ = cmd.tilt;
-            SendAngles();
+        case Action::kLook:  // pan drives the right arm, tilt the left one
+            RampTo(cmd.tilt, cmd.pan, kSlowStepDeg, kSlowStepMs);
             break;
 
-        case Action::kNod: {
-            const int base = tilt_;
-            for (int i = 0; i < cmd.count; ++i) {
-                tilt_ = std::clamp(base + kSwingAmplitude, kAngleMin, kAngleMax);
-                SendAngles();
-                vTaskDelay(pdMS_TO_TICKS(kSwingStepMs));
-                tilt_ = std::clamp(base - kSwingAmplitude, kAngleMin, kAngleMax);
-                SendAngles();
-                vTaskDelay(pdMS_TO_TICKS(kSwingStepMs));
-            }
-            tilt_ = base;
-            SendAngles();
+        case Action::kRaiseLeft:
+            RampTo(kArmRaise, right_, kSlowStepDeg, kSlowStepMs);
             break;
-        }
 
-        case Action::kShake: {
-            const int base = pan_;
-            for (int i = 0; i < cmd.count; ++i) {
-                pan_ = std::clamp(base + kSwingAmplitude, kAngleMin, kAngleMax);
-                SendAngles();
-                vTaskDelay(pdMS_TO_TICKS(kSwingStepMs));
-                pan_ = std::clamp(base - kSwingAmplitude, kAngleMin, kAngleMax);
-                SendAngles();
-                vTaskDelay(pdMS_TO_TICKS(kSwingStepMs));
-            }
-            pan_ = base;
-            SendAngles();
+        case Action::kLowerLeft:
+            RampTo(kArmDown, right_, kSlowStepDeg, kSlowStepMs);
             break;
-        }
+
+        case Action::kRaiseRight:
+            RampTo(left_, kArmRaise, kSlowStepDeg, kSlowStepMs);
+            break;
+
+        case Action::kLowerRight:
+            RampTo(left_, kArmDown, kSlowStepDeg, kSlowStepMs);
+            break;
+
+        case Action::kDance:
+            Dance(cmd.count);
+            break;
+
+        case Action::kWave:
+            Wave(cmd.count);
+            break;
     }
 }
 
@@ -126,63 +185,73 @@ void HeadController::RegisterTools() {
     auto& mcp_server = McpServer::GetInstance();
 
     mcp_server.AddTool(
-        "self.head.look",
-        "Turn the head to an absolute angle so it faces a direction. "
-        "pan: 0-180 horizontal, 90 is straight ahead. "
-        "tilt: 0-180 vertical, 90 is level, smaller looks down, larger looks up.",
-        PropertyList({
-            Property("pan", kPropertyTypeInteger, kHomeAngle, kAngleMin, kAngleMax),
-            Property("tilt", kPropertyTypeInteger, kHomeAngle, kAngleMin, kAngleMax),
-        }),
-        [this](const PropertyList& properties) -> ReturnValue {
-            int pan = properties["pan"].value<int>();
-            int tilt = properties["tilt"].value<int>();
-            if (!Enqueue(Action::kLook, pan, tilt, 1)) {
-                return std::string("Head is busy, command dropped.");
-            }
-            ESP_LOGI(TAG, "look pan=%d tilt=%d", pan, tilt);
-            return std::string("Head turned to pan=") + std::to_string(pan) + " tilt=" +
-                   std::to_string(tilt) + ".";
-        });
-
-    mcp_server.AddTool(
-        "self.head.center",
-        "Return the head to its neutral forward-facing pose.",
+        "self.arm.raise_left",
+        "举起左手（左臂）。Raise the robot's left arm up.",
         PropertyList(), [this](const PropertyList& properties) -> ReturnValue {
-            if (!Enqueue(Action::kCenter, kHomeAngle, kHomeAngle, 1)) {
-                return std::string("Head is busy, command dropped.");
+            if (!Enqueue(Action::kRaiseLeft)) {
+                return std::string("Arm is busy, command dropped.");
             }
-            ESP_LOGI(TAG, "center");
-            return std::string("Head centered.");
+            ESP_LOGI(TAG, "raise left");
+            return std::string("Left arm raised.");
         });
 
     mcp_server.AddTool(
-        "self.head.nod",
-        "Nod the head up and down, like saying yes.",
-        PropertyList({
-            Property("count", kPropertyTypeInteger, 1, 1, 5),
-        }),
-        [this](const PropertyList& properties) -> ReturnValue {
-            int count = properties["count"].value<int>();
-            if (!Enqueue(Action::kNod, pan_, tilt_, count)) {
-                return std::string("Head is busy, command dropped.");
+        "self.arm.raise_right",
+        "举起右手（右臂）。Raise the robot's right arm up.",
+        PropertyList(), [this](const PropertyList& properties) -> ReturnValue {
+            if (!Enqueue(Action::kRaiseRight)) {
+                return std::string("Arm is busy, command dropped.");
             }
-            ESP_LOGI(TAG, "nod count=%d", count);
-            return std::string("Head nodded.");
+            ESP_LOGI(TAG, "raise right");
+            return std::string("Right arm raised.");
         });
 
     mcp_server.AddTool(
-        "self.head.shake",
-        "Shake the head left and right, like saying no.",
+        "self.arm.lower_left",
+        "放下左手（左臂）。Lower the robot's left arm back down.",
+        PropertyList(), [this](const PropertyList& properties) -> ReturnValue {
+            if (!Enqueue(Action::kLowerLeft)) {
+                return std::string("Arm is busy, command dropped.");
+            }
+            ESP_LOGI(TAG, "lower left");
+            return std::string("Left arm lowered.");
+        });
+
+    mcp_server.AddTool(
+        "self.arm.lower_right",
+        "放下右手（右臂）。Lower the robot's right arm back down.",
+        PropertyList(), [this](const PropertyList& properties) -> ReturnValue {
+            if (!Enqueue(Action::kLowerRight)) {
+                return std::string("Arm is busy, command dropped.");
+            }
+            ESP_LOGI(TAG, "lower right");
+            return std::string("Right arm lowered.");
+        });
+
+    mcp_server.AddTool(
+        "self.arm.dance",
+        "跳舞：左右手交替上下挥动 count 次，然后复位。"
+        "Dance: the arms alternate up and down count times, then return home.",
         PropertyList({
-            Property("count", kPropertyTypeInteger, 1, 1, 5),
+            Property("count", kPropertyTypeInteger, 10, 2, 20),
         }),
         [this](const PropertyList& properties) -> ReturnValue {
             int count = properties["count"].value<int>();
-            if (!Enqueue(Action::kShake, pan_, tilt_, count)) {
-                return std::string("Head is busy, command dropped.");
+            if (!Enqueue(Action::kDance, kArmDown, kArmDown, count)) {
+                return std::string("Arm is busy, command dropped.");
             }
-            ESP_LOGI(TAG, "shake count=%d", count);
-            return std::string("Head shook.");
+            ESP_LOGI(TAG, "dance count=%d", count);
+            return std::string("Dancing.");
+        });
+
+    mcp_server.AddTool(
+        "self.arm.home",
+        "双臂放下复位，回到自然下垂姿势。Put both arms back down to the resting pose.",
+        PropertyList(), [this](const PropertyList& properties) -> ReturnValue {
+            if (!Enqueue(Action::kHome)) {
+                return std::string("Arm is busy, command dropped.");
+            }
+            ESP_LOGI(TAG, "home");
+            return std::string("Arms at rest.");
         });
 }

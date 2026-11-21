@@ -73,6 +73,9 @@ public:
     virtual bool GetTemperature(float& esp32temp);
     virtual Display* GetDisplay();
     virtual Camera* GetCamera();
+    // Called once per wake word, just before the assistant starts its greeting.
+    // Boards with moving parts use it for a small "hello" gesture.
+    virtual void OnWakeWord() {}
     virtual NetworkInterface* GetNetwork() = 0;
     virtual void StartNetwork() = 0;
     virtual void SetNetworkEventCallback(NetworkEventCallback callback) { (void)callback; }
