@@ -924,7 +924,11 @@ void Application::HandleStopListeningEvent() {
 }
 
 void Application::EnterIdleForMusicPlayback() {
-    if (GetDeviceState() != kDeviceStateListening) {
+    const auto state = GetDeviceState();
+    // Speaking is included on purpose: a reply that never arrives must not be
+    // able to hold the device in the speaking state (and the speaker) hostage
+    // while music is streaming.
+    if (state != kDeviceStateListening && state != kDeviceStateSpeaking) {
         return;
     }
     // End this server conversation for good, do not just stop listening. A

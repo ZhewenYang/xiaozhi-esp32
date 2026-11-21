@@ -36,6 +36,10 @@ constexpr int kMaxRedirects = 6;
 // A CDN socket can be closed at any point; resume that many times before
 // treating the stream as dead for good.
 constexpr int kMaxReconnects = 6;
+// How long the first music chunk may wait for a server reply to finish before
+// the player takes the speaker back. Long enough for a normal "好啦，正在播放"
+// sentence, short enough that a stuck speaking state cannot mute the song.
+constexpr int64_t kMaxReplyWaitUs = 4LL * 1000 * 1000;
 
 #define MUSIC_RATE_CVT_CFG(_src_rate, _dest_rate)                               \
     (esp_ae_rate_cvt_cfg_t) {                                                   \
@@ -587,13 +591,32 @@ void MusicPlayer::FeedPcm(const uint8_t* data, size_t size, uint32_t sample_rate
 
     const size_t chunk = std::max<size_t>(1, target_rate * kChunkMs / 1000);
     size_t offset = 0;
+    int64_t reply_wait_us = 0;
     while (offset < source->size() && !stop_requested_.load()) {
         // A server reply owns the speaker. Keep the decoded PCM here and stop
         // pulling from the socket until the reply is over, so the sentence is
         // not interleaved with music and the stream resumes afterwards.
-        if (audio_service_->IsPlaybackSessionActive()) {
-            vTaskDelay(pdMS_TO_TICKS(30));
-            continue;
+        //
+        // Bounded wait: some LLM turns end right after the tool call without a
+        // closing sentence, and the server then leaves the session in the
+        // speaking state forever. Before this timeout the music thread waited
+        // for an "reply finished" flag that never came, so the screen stayed on
+        // "说话中" and not a single sample reached the speaker.
+        //
+        // FeedPcm runs once per decoded frame, so the timeout must be latched
+        // by idle_requested_: waiting again on every frame would turn a stuck
+        // session into 4 s of silence per frame.
+        if (audio_service_->IsPlaybackSessionActive() && !idle_requested_) {
+            if (reply_wait_us < kMaxReplyWaitUs) {
+                vTaskDelay(pdMS_TO_TICKS(30));
+                reply_wait_us += 30000;
+                continue;
+            }
+            idle_requested_ = true;
+            ESP_LOGW(TAG, "reply session still active after %d ms, taking the speaker back",
+                     (int)(reply_wait_us / 1000));
+            Application::GetInstance().Schedule(
+                []() { Application::GetInstance().EnterIdleForMusicPlayback(); });
         }
         const size_t n = std::min(chunk, source->size() - offset);
         std::vector<int16_t> block(source->begin() + offset, source->begin() + offset + n);
