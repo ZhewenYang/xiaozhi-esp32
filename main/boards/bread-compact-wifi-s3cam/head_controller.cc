@@ -37,11 +37,13 @@ HeadController::HeadController(uart_port_t uart_num, gpio_num_t tx_pin) : uart_n
 
     RegisterTools();
 
-    // Both servos are wherever the previous run left them. Send the hanging pose
-    // once so every ramp below starts from an angle the firmware knows about.
+    // Deliberately does not send an angle here. The mechanical mounting has just
+    // been changed by hand and the firmware cannot know which way round the arms
+    // are until self.arm.mount says so; sending the hanging pose blindly could
+    // whip a long arm 180 degrees. The first gesture (or self.arm.home, which
+    // always resends) establishes the pose instead.
     left_ = kArmDown;
     right_ = kArmDown;
-    SendAngles();
 }
 
 void HeadController::WaveOnWake() {
@@ -56,12 +58,8 @@ void HeadController::TaskEntry(void* arg) {
 }
 
 void HeadController::Run() {
-    // Repeat the initial pose once the sub-board has had time to boot: the very
-    // first line sent from the constructor can be lost while it is still
-    // starting up, which would leave the arms at 90 degrees.
-    vTaskDelay(pdMS_TO_TICKS(200));
-    SendAngles();
-
+    // No initial pose is sent: see the constructor. Just idle until a command
+    // arrives, then execute it.
     Command cmd = {};
     for (;;) {
         if (xQueueReceive(queue_, &cmd, portMAX_DELAY) != pdTRUE) {
@@ -180,6 +178,10 @@ void HeadController::Execute(const Command& cmd) {
     switch (cmd.action) {
         case Action::kHome:
             RampTo(kArmDown, kArmDown, kSlowStepDeg, kSlowStepMs);
+            // RampTo bails out when the arms are already home in software, which
+            // is exactly the state right after a reboot. Resend anyway so "put
+            // the arms down" is a reliable way to discover the real pose.
+            SendAngles();
             break;
 
         case Action::kLook:  // pan drives the right arm, tilt the left one
