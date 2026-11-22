@@ -40,6 +40,7 @@ HeadController::HeadController(uart_port_t uart_num, gpio_num_t tx_pin) : uart_n
 }
 
 void HeadController::WaveOnWake() {
+    ESP_LOGI(TAG, "wave on wake");
     if (!Enqueue(Action::kWave, kArmDown, kArmDown, 3)) {
         ESP_LOGW(TAG, "wave dropped, queue full");
     }
@@ -74,9 +75,12 @@ void HeadController::SendLine(const std::string& line) {
 
 void HeadController::SendAngles() {
     char buf[16];
-    snprintf(buf, sizeof(buf), "nod=%d", left_);     // left arm
+    // left_ / right_ hold lift angles; the sub-board wants raw servo angles.
+    int left_phys = std::clamp(left_ + kArmDownPhys, kAngleMin, kAngleMax);
+    int right_phys = std::clamp(right_ + kArmDownPhys, kAngleMin, kAngleMax);
+    snprintf(buf, sizeof(buf), "nod=%d", left_phys);     // left arm
     SendLine(buf);
-    snprintf(buf, sizeof(buf), "shake=%d", right_);  // right arm
+    snprintf(buf, sizeof(buf), "shake=%d", right_phys);  // right arm
     SendLine(buf);
 }
 
@@ -97,8 +101,9 @@ bool HeadController::Enqueue(Action action, int pan, int tilt, int count) {
 // control, so the pacing happens here: one UART line pair every step_ms, which
 // at 115200 baud costs well under a millisecond each.
 void HeadController::RampTo(int left_target, int right_target, int step_deg, int step_ms) {
-    left_target = std::clamp(left_target, kAngleMin, kAngleMax);
-    right_target = std::clamp(right_target, kAngleMin, kAngleMax);
+    // Lift angles: -kArmDownPhys .. (180 - kArmDownPhys), i.e. the full servo range.
+    left_target = std::clamp(left_target, -kArmDownPhys, kAngleMax - kArmDownPhys);
+    right_target = std::clamp(right_target, -kArmDownPhys, kAngleMax - kArmDownPhys);
 
     const int from_left = left_;
     const int from_right = right_;
@@ -178,6 +183,10 @@ void HeadController::Execute(const Command& cmd) {
         case Action::kWave:
             Wave(cmd.count);
             break;
+
+        case Action::kSet:  // cmd.pan/tilt carry raw servo angles
+            RampTo(cmd.tilt - kArmDownPhys, cmd.pan - kArmDownPhys, kSlowStepDeg, kSlowStepMs);
+            break;
     }
 }
 
@@ -253,5 +262,35 @@ void HeadController::RegisterTools() {
             }
             ESP_LOGI(TAG, "home");
             return std::string("Arms at rest.");
+        });
+
+    // Bench calibration: drive the servos to a raw angle so the real "hanging
+    // down" position can be found by eye, then baked into kArmDownPhys.
+    mcp_server.AddTool(
+        "self.arm.set",
+        "标定/直调：把手臂调到指定舵机角度（0-180）。0 与 180 是两个极限，"
+        "side 取 left/right/both。Set raw servo angle for calibration.",
+        PropertyList({
+            Property("angle", kPropertyTypeInteger, 90, 0, 180),
+            Property("side", kPropertyTypeString, std::string("both")),
+        }),
+        [this](const PropertyList& properties) -> ReturnValue {
+            const int angle = properties["angle"].value<int>();
+            const std::string side = properties["side"].value<std::string>();
+            int left_phys = left_ + kArmDownPhys;
+            int right_phys = right_ + kArmDownPhys;
+            if (side == "left") {
+                left_phys = angle;
+            } else if (side == "right") {
+                right_phys = angle;
+            } else {
+                left_phys = angle;
+                right_phys = angle;
+            }
+            if (!Enqueue(Action::kSet, right_phys, left_phys, 1)) {
+                return std::string("Arm is busy, command dropped.");
+            }
+            ESP_LOGI(TAG, "set %s=%d", side.c_str(), angle);
+            return std::string("Arms set to ") + std::to_string(angle) + ".";
         });
 }

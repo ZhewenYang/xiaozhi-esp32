@@ -17,9 +17,14 @@
 //   center          both servos to 90 degrees (not used in arm mode)
 //
 // ARM DEMO MODE (temporary): the pan/tilt head has been re-mounted as a pair of
-// arms for a children demo. 0 degrees is the arm hanging down, larger angles
-// lift it. The sub-board firmware is untouched, so the two channels keep their
-// old names: "shake" drives the right arm, "nod" drives the left one.
+// arms for a children demo. The sub-board firmware is untouched, so the two
+// channels keep their old names: "shake" drives the right arm, "nod" drives the
+// left one.
+//
+// Angles are split in two: the driver keeps a "lift" angle where 0 means the arm
+// hangs straight down and positive means lifting forward, while the servo wants
+// a raw 0-180 angle whose zero point sits at the *backward* end of the travel.
+// kArmDownPhys bridges the two; see its comment for how it was measured.
 //
 // Two things matter here:
 //   * nothing blocks the MCP callback: commands are queued to a dedicated task;
@@ -43,6 +48,7 @@ private:
         kLowerRight,
         kDance,       // arms alternate up/down N times, then home
         kWave,        // raise right arm, wave N times, then home
+        kSet,         // direct servo angles, for bench calibration
     };
 
     struct Command {
@@ -54,12 +60,24 @@ private:
 
     static constexpr int kAngleMin = 0;
     static constexpr int kAngleMax = 180;
+
+    // Bench calibration of the servo zero point.
+    //
+    // Commanding 0 drives the arm up and *backwards*, so 0 is the backward end
+    // of the travel and 180 the forward end; the arm hangs straight down at 90.
+    // Everything above the driver works in "lift angles": 0 = hanging down,
+    // positive = lifting forward, and SendAngles() adds kArmDownPhys to get the
+    // servo angle. If this guess is wrong, run self.arm.set to find the pose
+    // where the arm really hangs and change this one number.
+    static constexpr int kArmDownPhys = 90;
+
+    // Lift angles (relative to hanging down, forward positive).
     static constexpr int kArmDown = 0;      // hanging down, natural pose
-    static constexpr int kArmRaise = 100;   // "arm raised" pose
-    static constexpr int kWaveLow = 60;     // wave swing, lower end
-    static constexpr int kWaveHigh = 95;    // wave swing, upper end
-    static constexpr int kDanceLow = 10;    // dance swing, lower end
-    static constexpr int kDanceHigh = 80;   // dance swing, upper end
+    static constexpr int kArmRaise = 75;    // "arm raised" pose -> 165 physical
+    static constexpr int kWaveLow = 38;     // wave swing, lower end
+    static constexpr int kWaveHigh = 70;    // wave swing, upper end
+    static constexpr int kDanceLow = 8;     // dance swing, lower end
+    static constexpr int kDanceHigh = 62;   // dance swing, upper end
 
     // Speed is set by step size / step period, not by the sub-board.
     static constexpr int kSlowStepDeg = 1;      // ~55 deg/s, calm gestures
