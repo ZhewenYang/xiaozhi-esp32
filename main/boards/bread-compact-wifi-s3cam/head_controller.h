@@ -23,7 +23,7 @@
 //
 // Angles are split in two: the driver keeps a "lift" angle where 0 means the arm
 // hangs straight down and positive means lifting it, while the servo wants a raw
-// 0-180 angle. kArmDownPhys / kLiftSign bridge the two; see their comment for
+// 0-180 angle. ArmDownPhys() / LiftSign() bridge the two; see their comment for
 // the bench measurement and the mechanical fix that makes lifting go forward.
 //
 // Two things matter here:
@@ -49,6 +49,7 @@ private:
         kDance,       // arms alternate up/down N times, then home
         kWave,        // raise right arm, wave N times, then home
         kSet,         // direct servo angles, for bench calibration
+        kSync,        // re-send the hanging pose after a mounting change
     };
 
     struct Command {
@@ -61,23 +62,32 @@ private:
     static constexpr int kAngleMin = 0;
     static constexpr int kAngleMax = 180;
 
-    // Bench calibration of the servo zero point.
+    // Servo zero point / mounting direction.
     //
     // Measured on the robot as shipped: commanding 0 puts the arm straight
     // down, 90 points it horizontally *backwards* and 180 lifts it straight up
     // behind the body. The reachable half of the circle is the back half, so no
-    // servo angle can reach forward - that has to be fixed mechanically.
+    // servo angle can reach forward - the arm has to be re-mounted by 180
+    // degrees first, and these servos' horns are press-fitted, so depending on
+    // what could actually be turned there are two ways to get there:
     //
-    // Fix: pull each servo horn off, turn it 180 degrees and screw it back on
-    // (one screw). The travel then covers up-front -> forward -> down, with the
-    // hanging pose at 180, so kArmDownPhys = 180 and lifting walks *down* the
-    // angle scale (kLiftSign = -1).
+    //   kMountFront - the horn (or the arm extension bolted to it) was turned
+    //                 180 degrees on the spline. Travel: 0 = up, 90 = forward,
+    //                 180 = hanging down. Lifting walks *down* the scale.
+    //   kMountBack  - the whole servo body was turned 180 degrees around its own
+    //                 output shaft instead. Same sweep, reached from the other
+    //                 end: 0 = hanging down, 90 = backwards, 180 = up.
     //
-    // If you instead flip the servo body around the vertical axis, the hanging
-    // pose stays at 0 and lifting walks up the scale: kArmDownPhys = 0,
-    // kLiftSign = +1. Nothing else needs to change.
-    static constexpr int kArmDownPhys = 180;
-    static constexpr int kLiftSign = -1;
+    // Both end up identical from the outside once the matching change is made,
+    // so the mapping is a runtime switch (self.arm.mount) saved in NVS rather
+    // than a rebuild, because the mechanical side is trial and error.
+    static constexpr int kMountFront = 0;
+    static constexpr int kMountBack = 1;
+
+    int mount_ = kMountFront;
+
+    int ArmDownPhys() const { return mount_ == kMountFront ? 180 : 0; }
+    int LiftSign() const { return mount_ == kMountFront ? -1 : 1; }
 
     // Lift angles (relative to hanging down).
     static constexpr int kArmDown = 0;      // hanging down, natural pose
@@ -104,8 +114,10 @@ private:
     bool Enqueue(Action action, int pan = kArmDown, int tilt = kArmDown, int count = 1);
     void SendLine(const std::string& line);
     void SendAngles();
-    static int ToPhysical(int lift);
-    static int ToLift(int physical);
+    int ToPhysical(int lift) const;
+    int ToLift(int physical) const;
+    void LoadMount();
+    void SaveMount(int mount);
     void RampTo(int left_target, int right_target, int step_deg, int step_ms);
     void Dance(int count);
     void Wave(int count);

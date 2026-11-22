@@ -1,5 +1,6 @@
 #include "head_controller.h"
 #include "mcp_server.h"
+#include "settings.h"
 
 #include <algorithm>
 #include <cstdio>
@@ -22,6 +23,10 @@ HeadController::HeadController(uart_port_t uart_num, gpio_num_t tx_pin) : uart_n
                                  UART_PIN_NO_CHANGE));
     ESP_ERROR_CHECK(uart_driver_install(uart_num_, 512, 0, 0, nullptr, 0));
     ESP_LOGI(TAG, "arm link ready: TX=GPIO%d @115200 8N1", (int)tx_pin);
+
+    LoadMount();
+    ESP_LOGI(TAG, "mounting %s (hang=%d deg)", mount_ == kMountFront ? "front" : "back",
+             ArmDownPhys());
 
     queue_ = xQueueCreate(8, sizeof(Command));
     if (queue_ == nullptr) {
@@ -73,12 +78,23 @@ void HeadController::SendLine(const std::string& line) {
     ESP_LOGD(TAG, "-> %s", line.c_str());
 }
 
-int HeadController::ToPhysical(int lift) {
-    return std::clamp(kArmDownPhys + kLiftSign * lift, kAngleMin, kAngleMax);
+int HeadController::ToPhysical(int lift) const {
+    return std::clamp(ArmDownPhys() + LiftSign() * lift, kAngleMin, kAngleMax);
 }
 
-int HeadController::ToLift(int physical) {
-    return (physical - kArmDownPhys) * kLiftSign;  // kLiftSign is +1 or -1
+int HeadController::ToLift(int physical) const {
+    return (physical - ArmDownPhys()) * LiftSign();  // LiftSign() is +1 or -1
+}
+
+void HeadController::LoadMount() {
+    Settings settings("arm");
+    const int stored = settings.GetInt("mount", kMountFront);
+    mount_ = (stored == kMountBack) ? kMountBack : kMountFront;
+}
+
+void HeadController::SaveMount(int mount) {
+    Settings settings("arm", true);
+    settings.SetInt("mount", mount);
 }
 
 void HeadController::SendAngles() {
@@ -197,6 +213,12 @@ void HeadController::Execute(const Command& cmd) {
         case Action::kSet:  // cmd.pan/tilt carry raw servo angles
             RampTo(ToLift(cmd.tilt), ToLift(cmd.pan), kSlowStepDeg, kSlowStepMs);
             break;
+
+        case Action::kSync:  // mounting changed: re-assert the hanging pose
+            left_ = kArmDown;
+            right_ = kArmDown;
+            SendAngles();
+            break;
     }
 }
 
@@ -275,7 +297,7 @@ void HeadController::RegisterTools() {
         });
 
     // Bench calibration: drive the servos to a raw angle so the real "hanging
-    // down" position can be found by eye, then baked into kArmDownPhys.
+    // down" position can be found by eye, then compared against the mapping.
     mcp_server.AddTool(
         "self.arm.set",
         "标定/直调：把手臂调到指定舵机角度（0-180）。0 与 180 是两个极限，"
@@ -302,5 +324,37 @@ void HeadController::RegisterTools() {
             }
             ESP_LOGI(TAG, "set %s=%d", side.c_str(), angle);
             return std::string("Arms set to ") + std::to_string(angle) + ".";
+        });
+
+    // Mechanical mounting direction. The servos can only sweep the back half of
+    // the circle as shipped, so the arms had to be re-mounted 180 degrees; this
+    // tells the firmware which of the two re-mountings was actually done.
+    mcp_server.AddTool(
+        "self.arm.mount",
+        "切换手臂安装方向，机械改装后才需要。mode=front：舵盘或延长臂已翻转180度（下垂=舵机180度）；"
+        "mode=back：整个舵机绕输出轴掉头安装（下垂=舵机0度）。设置存入 NVS，重启后保留。"
+        "Switch the arm mounting after a mechanical change. front = horn turned 180, "
+        "back = servo body turned 180. Saved in NVS.",
+        PropertyList({
+            Property("mode", kPropertyTypeString, std::string("front")),
+        }),
+        [this](const PropertyList& properties) -> ReturnValue {
+            const std::string mode = properties["mode"].value<std::string>();
+            int next;
+            if (mode == "front") {
+                next = kMountFront;
+            } else if (mode == "back") {
+                next = kMountBack;
+            } else {
+                return std::string("mode must be front or back.");
+            }
+            if (next == mount_) {
+                return std::string("Already mounted ") + mode + ".";
+            }
+            mount_ = next;
+            SaveMount(mount_);
+            Enqueue(Action::kSync);
+            ESP_LOGI(TAG, "mount -> %s", mode.c_str());
+            return std::string("Mounting set to ") + mode + ", arms re-homed.";
         });
 }
