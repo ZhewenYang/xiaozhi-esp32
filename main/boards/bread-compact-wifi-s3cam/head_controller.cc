@@ -73,11 +73,19 @@ void HeadController::SendLine(const std::string& line) {
     ESP_LOGD(TAG, "-> %s", line.c_str());
 }
 
+int HeadController::ToPhysical(int lift) {
+    return std::clamp(kArmDownPhys + kLiftSign * lift, kAngleMin, kAngleMax);
+}
+
+int HeadController::ToLift(int physical) {
+    return (physical - kArmDownPhys) * kLiftSign;  // kLiftSign is +1 or -1
+}
+
 void HeadController::SendAngles() {
     char buf[16];
     // left_ / right_ hold lift angles; the sub-board wants raw servo angles.
-    int left_phys = std::clamp(left_ + kArmDownPhys, kAngleMin, kAngleMax);
-    int right_phys = std::clamp(right_ + kArmDownPhys, kAngleMin, kAngleMax);
+    const int left_phys = ToPhysical(left_);
+    const int right_phys = ToPhysical(right_);
     snprintf(buf, sizeof(buf), "nod=%d", left_phys);     // left arm
     SendLine(buf);
     snprintf(buf, sizeof(buf), "shake=%d", right_phys);  // right arm
@@ -101,9 +109,11 @@ bool HeadController::Enqueue(Action action, int pan, int tilt, int count) {
 // control, so the pacing happens here: one UART line pair every step_ms, which
 // at 115200 baud costs well under a millisecond each.
 void HeadController::RampTo(int left_target, int right_target, int step_deg, int step_ms) {
-    // Lift angles: -kArmDownPhys .. (180 - kArmDownPhys), i.e. the full servo range.
-    left_target = std::clamp(left_target, -kArmDownPhys, kAngleMax - kArmDownPhys);
-    right_target = std::clamp(right_target, -kArmDownPhys, kAngleMax - kArmDownPhys);
+    // Clamp in lift space to whatever the servo travel allows in this mounting.
+    const int lift_lo = std::min(ToLift(kAngleMin), ToLift(kAngleMax));
+    const int lift_hi = std::max(ToLift(kAngleMin), ToLift(kAngleMax));
+    left_target = std::clamp(left_target, lift_lo, lift_hi);
+    right_target = std::clamp(right_target, lift_lo, lift_hi);
 
     const int from_left = left_;
     const int from_right = right_;
@@ -185,7 +195,7 @@ void HeadController::Execute(const Command& cmd) {
             break;
 
         case Action::kSet:  // cmd.pan/tilt carry raw servo angles
-            RampTo(cmd.tilt - kArmDownPhys, cmd.pan - kArmDownPhys, kSlowStepDeg, kSlowStepMs);
+            RampTo(ToLift(cmd.tilt), ToLift(cmd.pan), kSlowStepDeg, kSlowStepMs);
             break;
     }
 }
@@ -277,8 +287,8 @@ void HeadController::RegisterTools() {
         [this](const PropertyList& properties) -> ReturnValue {
             const int angle = properties["angle"].value<int>();
             const std::string side = properties["side"].value<std::string>();
-            int left_phys = left_ + kArmDownPhys;
-            int right_phys = right_ + kArmDownPhys;
+            int left_phys = ToPhysical(left_);
+            int right_phys = ToPhysical(right_);
             if (side == "left") {
                 left_phys = angle;
             } else if (side == "right") {

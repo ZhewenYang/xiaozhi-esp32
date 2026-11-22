@@ -22,9 +22,9 @@
 // left one.
 //
 // Angles are split in two: the driver keeps a "lift" angle where 0 means the arm
-// hangs straight down and positive means lifting forward, while the servo wants
-// a raw 0-180 angle whose zero point sits at the *backward* end of the travel.
-// kArmDownPhys bridges the two; see its comment for how it was measured.
+// hangs straight down and positive means lifting it, while the servo wants a raw
+// 0-180 angle. kArmDownPhys / kLiftSign bridge the two; see their comment for
+// the bench measurement and the mechanical fix that makes lifting go forward.
 //
 // Two things matter here:
 //   * nothing blocks the MCP callback: commands are queued to a dedicated task;
@@ -63,21 +63,29 @@ private:
 
     // Bench calibration of the servo zero point.
     //
-    // Commanding 0 drives the arm up and *backwards*, so 0 is the backward end
-    // of the travel and 180 the forward end; the arm hangs straight down at 90.
-    // Everything above the driver works in "lift angles": 0 = hanging down,
-    // positive = lifting forward, and SendAngles() adds kArmDownPhys to get the
-    // servo angle. If this guess is wrong, run self.arm.set to find the pose
-    // where the arm really hangs and change this one number.
-    static constexpr int kArmDownPhys = 90;
+    // Measured on the robot as shipped: commanding 0 puts the arm straight
+    // down, 90 points it horizontally *backwards* and 180 lifts it straight up
+    // behind the body. The reachable half of the circle is the back half, so no
+    // servo angle can reach forward - that has to be fixed mechanically.
+    //
+    // Fix: pull each servo horn off, turn it 180 degrees and screw it back on
+    // (one screw). The travel then covers up-front -> forward -> down, with the
+    // hanging pose at 180, so kArmDownPhys = 180 and lifting walks *down* the
+    // angle scale (kLiftSign = -1).
+    //
+    // If you instead flip the servo body around the vertical axis, the hanging
+    // pose stays at 0 and lifting walks up the scale: kArmDownPhys = 0,
+    // kLiftSign = +1. Nothing else needs to change.
+    static constexpr int kArmDownPhys = 180;
+    static constexpr int kLiftSign = -1;
 
-    // Lift angles (relative to hanging down, forward positive).
+    // Lift angles (relative to hanging down).
     static constexpr int kArmDown = 0;      // hanging down, natural pose
-    static constexpr int kArmRaise = 75;    // "arm raised" pose -> 165 physical
-    static constexpr int kWaveLow = 38;     // wave swing, lower end
-    static constexpr int kWaveHigh = 70;    // wave swing, upper end
-    static constexpr int kDanceLow = 8;     // dance swing, lower end
-    static constexpr int kDanceHigh = 62;   // dance swing, upper end
+    static constexpr int kArmRaise = 95;    // arm raised forward, a bit above level
+    static constexpr int kWaveLow = 55;     // wave swing, lower end
+    static constexpr int kWaveHigh = 80;    // wave swing, upper end
+    static constexpr int kDanceLow = 20;    // dance swing, lower end
+    static constexpr int kDanceHigh = 110;  // dance swing, upper end
 
     // Speed is set by step size / step period, not by the sub-board.
     static constexpr int kSlowStepDeg = 1;      // ~55 deg/s, calm gestures
@@ -96,6 +104,8 @@ private:
     bool Enqueue(Action action, int pan = kArmDown, int tilt = kArmDown, int count = 1);
     void SendLine(const std::string& line);
     void SendAngles();
+    static int ToPhysical(int lift);
+    static int ToLift(int physical);
     void RampTo(int left_target, int right_target, int step_deg, int step_ms);
     void Dance(int count);
     void Wave(int count);
