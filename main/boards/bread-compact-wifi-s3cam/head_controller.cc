@@ -88,11 +88,18 @@ void HeadController::LoadMount() {
     Settings settings("arm");
     const int stored = settings.GetInt("mount", kMountFront);
     mount_ = (stored == kMountBack) ? kMountBack : kMountFront;
+    zero_ = std::clamp(settings.GetInt("zero", DefaultZero()), kAngleMin, kAngleMax);
 }
 
 void HeadController::SaveMount(int mount) {
     Settings settings("arm", true);
     settings.SetInt("mount", mount);
+    settings.SetInt("zero", zero_);
+}
+
+void HeadController::SaveZero(int zero) {
+    Settings settings("arm", true);
+    settings.SetInt("zero", zero);
 }
 
 void HeadController::SendAngles() {
@@ -354,9 +361,42 @@ void HeadController::RegisterTools() {
                 return std::string("Already mounted ") + mode + ".";
             }
             mount_ = next;
+            zero_ = DefaultZero();
             SaveMount(mount_);
             Enqueue(Action::kSync);
-            ESP_LOGI(TAG, "mount -> %s", mode.c_str());
-            return std::string("Mounting set to ") + mode + ", arms re-homed.";
+            ESP_LOGI(TAG, "mount -> %s, zero=%d", mode.c_str(), zero_);
+            return std::string("Mounting set to ") + mode + ", hang pose at " +
+                   std::to_string(zero_) + " deg.";
+        });
+
+    // Fine trim of the hanging pose: the horn lands wherever its splines fall,
+    // so "arm straight down" is rarely the 180 / 0 endpoint. Positive delta
+    // turns the gear one way, negative the other; absolute angle also accepted.
+    mcp_server.AddTool(
+        "self.arm.zero",
+        "微调复位位：设定手臂自然下垂时对应的舵机角度（0-180）。"
+        "angle 传绝对值（不传则用 delta 相对调整，delta 正=角度增大、负=角度减小）。"
+        "设置存入 NVS，重启后保留。Set the servo angle treated as arms hanging down.",
+        PropertyList({
+            Property("angle", kPropertyTypeInteger, -1, -1, kAngleMax),
+            Property("delta", kPropertyTypeInteger, 0, -90, 90),
+        }),
+        [this](const PropertyList& properties) -> ReturnValue {
+            const int angle = properties["angle"].value<int>();
+            const int delta = properties["delta"].value<int>();
+            int next = zero_;
+            if (angle >= 0) {
+                next = angle;
+            } else if (delta != 0) {
+                next = zero_ + delta;
+            } else {
+                return std::string("zero is ") + std::to_string(zero_) + " deg.";
+            }
+            next = std::clamp(next, kAngleMin, kAngleMax);
+            zero_ = next;
+            SaveZero(zero_);
+            Enqueue(Action::kSync);
+            ESP_LOGI(TAG, "zero -> %d", zero_);
+            return std::string("Hang pose at ") + std::to_string(zero_) + " deg.";
         });
 }

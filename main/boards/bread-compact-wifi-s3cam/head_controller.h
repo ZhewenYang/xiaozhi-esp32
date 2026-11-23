@@ -84,9 +84,18 @@ private:
     static constexpr int kMountFront = 0;
     static constexpr int kMountBack = 1;
 
-    int mount_ = kMountFront;
+    // Servo angle at which the arm hangs straight down. The horn almost never
+    // lands exactly on the 180 / 0 endpoint, so this is trimmed at runtime with
+    // self.arm.zero and stored in NVS. The compiled defaults are the values
+    // measured on this particular build.
+    static constexpr int kZeroFront = 110;  // front mount: 70 deg short of 180
+    static constexpr int kZeroBack = 0;
 
-    int ArmDownPhys() const { return mount_ == kMountFront ? 180 : 0; }
+    int mount_ = kMountFront;
+    int zero_ = kZeroFront;
+
+    int DefaultZero() const { return mount_ == kMountFront ? kZeroFront : kZeroBack; }
+    int ArmDownPhys() const { return zero_; }
     int LiftSign() const { return mount_ == kMountFront ? -1 : 1; }
 
     // Lift angles (relative to hanging down).
@@ -118,6 +127,7 @@ private:
     int ToLift(int physical) const;
     void LoadMount();
     void SaveMount(int mount);
+    void SaveZero(int zero);
     void RampTo(int left_target, int right_target, int step_deg, int step_ms);
     void Dance(int count);
     void Wave(int count);
