@@ -108,13 +108,15 @@ private:
     static constexpr int kArmDirRight = 1;
 
     int mount_ = kMountFront;
-    int zero_ = kZeroFront;
+    int zero_ = kZeroFront;                        // right arm hang pose
+    int left_zero_ = kAngleMax - kZeroFront;       // left arm hang pose (mirrored)
     int dir_ = kDirNormal;
     int left_dir_ = kArmDirLeft;
     int right_dir_ = kArmDirRight;
 
     int DefaultZero() const { return mount_ == kMountFront ? kZeroFront : kZeroBack; }
     int ArmDownPhys() const { return zero_; }
+    int ArmZero(bool left) const { return left ? left_zero_ : zero_; }
     int LiftSign() const { return (mount_ == kMountFront ? -1 : 1) * dir_; }
     int ArmDir(bool left) const { return left ? left_dir_ : right_dir_; }
     int CombinedSign(bool left) const { return LiftSign() * ArmDir(left); }
@@ -152,6 +154,7 @@ private:
     void SaveZero(int zero);
     void SaveDir(int dir);
     void SaveArmDirs();
+    void SaveLeftZero(int zero);
     void RampTo(int left_target, int right_target, int step_deg, int step_ms);
     void Dance(int count);
     void Wave(int count);

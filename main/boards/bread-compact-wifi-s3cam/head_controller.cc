@@ -25,9 +25,9 @@ HeadController::HeadController(uart_port_t uart_num, gpio_num_t tx_pin) : uart_n
     ESP_LOGI(TAG, "arm link ready: TX=GPIO%d @115200 8N1", (int)tx_pin);
 
     LoadMount();
-    ESP_LOGI(TAG, "mounting %s (hang=%d deg, dir %+d, left %+d, right %+d)",
-             mount_ == kMountFront ? "front" : "back", ArmDownPhys(), LiftSign(),
-             CombinedSign(true), CombinedSign(false));
+    ESP_LOGI(TAG, "mounting %s (right hang=%d sig%+d, left hang=%d sig%+d, dir %+d)",
+             mount_ == kMountFront ? "front" : "back", zero_, CombinedSign(false), left_zero_,
+             CombinedSign(true), LiftSign());
 
     queue_ = xQueueCreate(8, sizeof(Command));
     if (queue_ == nullptr) {
@@ -78,11 +78,11 @@ void HeadController::SendLine(const std::string& line) {
 }
 
 int HeadController::ToPhysical(int lift, bool left) const {
-    return std::clamp(ArmDownPhys() + CombinedSign(left) * lift, kAngleMin, kAngleMax);
+    return std::clamp(ArmZero(left) + CombinedSign(left) * lift, kAngleMin, kAngleMax);
 }
 
 int HeadController::ToLift(int physical, bool left) const {
-    return (physical - ArmDownPhys()) * CombinedSign(left);  // sign is +1 or -1
+    return (physical - ArmZero(left)) * CombinedSign(left);  // sign is +1 or -1
 }
 
 // Lift values that are still reachable on this arm, given the hang pose and the
@@ -101,6 +101,11 @@ void HeadController::LoadMount() {
     mount_ = (stored == kMountBack) ? kMountBack : kMountFront;
     zero_ = std::clamp(static_cast<int>(settings.GetInt("zero", DefaultZero())), kAngleMin,
                        kAngleMax);
+    // The left servo is mounted back-to-back with the right one, so its hanging
+    // pose sits at the opposite end of the travel: 180 - zero. Stored separately
+    // because the mirror is never perfect and it may need its own trim.
+    left_zero_ = std::clamp(static_cast<int>(settings.GetInt("lzero", kAngleMax - zero_)),
+                            kAngleMin, kAngleMax);
     dir_ = (settings.GetInt("dir", kDirNormal) < 0) ? kDirFlipped : kDirNormal;
     left_dir_ = (settings.GetInt("ldir", kArmDirLeft) < 0) ? kDirFlipped : kDirNormal;
     right_dir_ = (settings.GetInt("rdir", kArmDirRight) < 0) ? kDirFlipped : kDirNormal;
@@ -110,6 +115,7 @@ void HeadController::SaveMount(int mount) {
     Settings settings("arm", true);
     settings.SetInt("mount", mount);
     settings.SetInt("zero", zero_);
+    settings.SetInt("lzero", left_zero_);
     settings.SetInt("dir", dir_);
     settings.SetInt("ldir", left_dir_);
     settings.SetInt("rdir", right_dir_);
@@ -118,6 +124,12 @@ void HeadController::SaveMount(int mount) {
 void HeadController::SaveZero(int zero) {
     Settings settings("arm", true);
     settings.SetInt("zero", zero);
+    settings.SetInt("lzero", left_zero_);
+}
+
+void HeadController::SaveLeftZero(int zero) {
+    Settings settings("arm", true);
+    settings.SetInt("lzero", zero);
 }
 
 void HeadController::SaveDir(int dir) {
@@ -394,6 +406,7 @@ void HeadController::RegisterTools() {
             }
             mount_ = next;
             zero_ = DefaultZero();
+            left_zero_ = kAngleMax - zero_;
             dir_ = kDirNormal;
             left_dir_ = kArmDirLeft;
             right_dir_ = kArmDirRight;
@@ -410,29 +423,42 @@ void HeadController::RegisterTools() {
     mcp_server.AddTool(
         "self.arm.zero",
         "微调复位位：设定手臂自然下垂时对应的舵机角度（0-180）。"
-        "angle 传绝对值（不传则用 delta 相对调整，delta 正=角度增大、负=角度减小）。"
-        "设置存入 NVS，重启后保留。Set the servo angle treated as arms hanging down.",
+        "angle 传绝对值（不传则用 delta 相对调整）；side 默认 both（左臂自动取镜像 180-angle，"
+        "单独微调左臂时传 left）。设置存入 NVS，重启后保留。"
+        "Set the servo angle treated as arms hanging down.",
         PropertyList({
             Property("angle", kPropertyTypeInteger, -1, -1, kAngleMax),
             Property("delta", kPropertyTypeInteger, 0, -90, 90),
+            Property("side", kPropertyTypeString, std::string("both")),
         }),
         [this](const PropertyList& properties) -> ReturnValue {
             const int angle = properties["angle"].value<int>();
             const int delta = properties["delta"].value<int>();
-            int next = zero_;
+            const std::string side = properties["side"].value<std::string>();
+            const bool left_only = (side == "left");
+            int base = left_only ? left_zero_ : zero_;
+            int next = base;
             if (angle >= 0) {
                 next = angle;
             } else if (delta != 0) {
-                next = zero_ + delta;
+                next = base + delta;
             } else {
-                return std::string("zero is ") + std::to_string(zero_) + " deg.";
+                return std::string("right hang ") + std::to_string(zero_) + ", left hang " +
+                       std::to_string(left_zero_) + " deg.";
             }
             next = std::clamp(next, kAngleMin, kAngleMax);
-            zero_ = next;
-            SaveZero(zero_);
+            if (left_only) {
+                left_zero_ = next;
+                SaveLeftZero(left_zero_);
+            } else {
+                zero_ = next;
+                left_zero_ = kAngleMax - zero_;  // keep the pair mirrored
+                SaveZero(zero_);
+            }
             Enqueue(Action::kSync);
-            ESP_LOGI(TAG, "zero -> %d", zero_);
-            return std::string("Hang pose at ") + std::to_string(zero_) + " deg.";
+            ESP_LOGI(TAG, "zero %s -> right %d, left %d", side.c_str(), zero_, left_zero_);
+            return std::string("Hang pose: right ") + std::to_string(zero_) + ", left " +
+                   std::to_string(left_zero_) + " deg.";
         });
 
     // Which way round "lift" runs. Kept apart from the hang pose so the two can
