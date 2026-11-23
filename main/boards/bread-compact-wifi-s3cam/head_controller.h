@@ -99,13 +99,25 @@ private:
     static constexpr int kDirNormal = 1;
     static constexpr int kDirFlipped = -1;
 
+    // Per-arm polarity, because the two servos are mounted mirrored: the same
+    // "lift" value can swing the right arm forward and the left arm backwards.
+    // The right arm is the reference; kArmDirLeft compensates the mirrored side.
+    // Flip one of these (or say "把左臂方向反过来") if a servo is ever re-mounted
+    // the other way round.
+    static constexpr int kArmDirLeft = -1;
+    static constexpr int kArmDirRight = 1;
+
     int mount_ = kMountFront;
     int zero_ = kZeroFront;
     int dir_ = kDirNormal;
+    int left_dir_ = kArmDirLeft;
+    int right_dir_ = kArmDirRight;
 
     int DefaultZero() const { return mount_ == kMountFront ? kZeroFront : kZeroBack; }
     int ArmDownPhys() const { return zero_; }
     int LiftSign() const { return (mount_ == kMountFront ? -1 : 1) * dir_; }
+    int ArmDir(bool left) const { return left ? left_dir_ : right_dir_; }
+    int CombinedSign(bool left) const { return LiftSign() * ArmDir(left); }
 
     // Lift angles (relative to hanging down).
     static constexpr int kArmDown = 0;      // hanging down, natural pose
@@ -132,12 +144,14 @@ private:
     bool Enqueue(Action action, int pan = kArmDown, int tilt = kArmDown, int count = 1);
     void SendLine(const std::string& line);
     void SendAngles();
-    int ToPhysical(int lift) const;
-    int ToLift(int physical) const;
+    int ToPhysical(int lift, bool left) const;
+    int ToLift(int physical, bool left) const;
+    void LiftRange(bool left, int* lo, int* hi) const;
     void LoadMount();
     void SaveMount(int mount);
     void SaveZero(int zero);
     void SaveDir(int dir);
+    void SaveArmDirs();
     void RampTo(int left_target, int right_target, int step_deg, int step_ms);
     void Dance(int count);
     void Wave(int count);

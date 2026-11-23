@@ -25,8 +25,9 @@ HeadController::HeadController(uart_port_t uart_num, gpio_num_t tx_pin) : uart_n
     ESP_LOGI(TAG, "arm link ready: TX=GPIO%d @115200 8N1", (int)tx_pin);
 
     LoadMount();
-    ESP_LOGI(TAG, "mounting %s (hang=%d deg, lift sign %+d)",
-             mount_ == kMountFront ? "front" : "back", ArmDownPhys(), LiftSign());
+    ESP_LOGI(TAG, "mounting %s (hang=%d deg, dir %+d, left %+d, right %+d)",
+             mount_ == kMountFront ? "front" : "back", ArmDownPhys(), LiftSign(),
+             CombinedSign(true), CombinedSign(false));
 
     queue_ = xQueueCreate(8, sizeof(Command));
     if (queue_ == nullptr) {
@@ -76,12 +77,22 @@ void HeadController::SendLine(const std::string& line) {
     ESP_LOGD(TAG, "-> %s", line.c_str());
 }
 
-int HeadController::ToPhysical(int lift) const {
-    return std::clamp(ArmDownPhys() + LiftSign() * lift, kAngleMin, kAngleMax);
+int HeadController::ToPhysical(int lift, bool left) const {
+    return std::clamp(ArmDownPhys() + CombinedSign(left) * lift, kAngleMin, kAngleMax);
 }
 
-int HeadController::ToLift(int physical) const {
-    return (physical - ArmDownPhys()) * LiftSign();  // LiftSign() is +1 or -1
+int HeadController::ToLift(int physical, bool left) const {
+    return (physical - ArmDownPhys()) * CombinedSign(left);  // sign is +1 or -1
+}
+
+// Lift values that are still reachable on this arm, given the hang pose and the
+// per-arm polarity. The hang pose sits somewhere in 0-180, so one direction
+// always runs out of travel before the other.
+void HeadController::LiftRange(bool left, int* lo, int* hi) const {
+    const int a = ToLift(kAngleMin, left);
+    const int b = ToLift(kAngleMax, left);
+    *lo = std::min(a, b);
+    *hi = std::max(a, b);
 }
 
 void HeadController::LoadMount() {
@@ -91,6 +102,8 @@ void HeadController::LoadMount() {
     zero_ = std::clamp(static_cast<int>(settings.GetInt("zero", DefaultZero())), kAngleMin,
                        kAngleMax);
     dir_ = (settings.GetInt("dir", kDirNormal) < 0) ? kDirFlipped : kDirNormal;
+    left_dir_ = (settings.GetInt("ldir", kArmDirLeft) < 0) ? kDirFlipped : kDirNormal;
+    right_dir_ = (settings.GetInt("rdir", kArmDirRight) < 0) ? kDirFlipped : kDirNormal;
 }
 
 void HeadController::SaveMount(int mount) {
@@ -98,6 +111,8 @@ void HeadController::SaveMount(int mount) {
     settings.SetInt("mount", mount);
     settings.SetInt("zero", zero_);
     settings.SetInt("dir", dir_);
+    settings.SetInt("ldir", left_dir_);
+    settings.SetInt("rdir", right_dir_);
 }
 
 void HeadController::SaveZero(int zero) {
@@ -110,11 +125,18 @@ void HeadController::SaveDir(int dir) {
     settings.SetInt("dir", dir);
 }
 
+void HeadController::SaveArmDirs() {
+    Settings settings("arm", true);
+    settings.SetInt("ldir", left_dir_);
+    settings.SetInt("rdir", right_dir_);
+}
+
 void HeadController::SendAngles() {
     char buf[16];
-    // left_ / right_ hold lift angles; the sub-board wants raw servo angles.
-    const int left_phys = ToPhysical(left_);
-    const int right_phys = ToPhysical(right_);
+    // left_ / right_ hold lift angles; the sub-board wants raw servo angles, and
+    // the two arms need opposite conversions because they are mounted mirrored.
+    const int left_phys = ToPhysical(left_, true);
+    const int right_phys = ToPhysical(right_, false);
     snprintf(buf, sizeof(buf), "nod=%d", left_phys);     // left arm
     SendLine(buf);
     snprintf(buf, sizeof(buf), "shake=%d", right_phys);  // right arm
@@ -138,10 +160,12 @@ bool HeadController::Enqueue(Action action, int pan, int tilt, int count) {
 // control, so the pacing happens here: one UART line pair every step_ms, which
 // at 115200 baud costs well under a millisecond each.
 void HeadController::RampTo(int left_target, int right_target, int step_deg, int step_ms) {
-    // Clamp in lift space to whatever the servo travel allows in this mounting.
-    const int lift_lo = std::min(ToLift(kAngleMin), ToLift(kAngleMax));
-    const int lift_hi = std::max(ToLift(kAngleMin), ToLift(kAngleMax));
+    // Clamp in lift space to whatever the servo travel allows for each arm.
+    int lift_lo = 0;
+    int lift_hi = 0;
+    LiftRange(true, &lift_lo, &lift_hi);
     left_target = std::clamp(left_target, lift_lo, lift_hi);
+    LiftRange(false, &lift_lo, &lift_hi);
     right_target = std::clamp(right_target, lift_lo, lift_hi);
 
     const int from_left = left_;
@@ -228,7 +252,7 @@ void HeadController::Execute(const Command& cmd) {
             break;
 
         case Action::kSet:  // cmd.pan/tilt carry raw servo angles
-            RampTo(ToLift(cmd.tilt), ToLift(cmd.pan), kSlowStepDeg, kSlowStepMs);
+            RampTo(ToLift(cmd.tilt, true), ToLift(cmd.pan, false), kSlowStepDeg, kSlowStepMs);
             break;
 
         case Action::kSync:  // mounting changed: re-assert the hanging pose
@@ -326,8 +350,8 @@ void HeadController::RegisterTools() {
         [this](const PropertyList& properties) -> ReturnValue {
             const int angle = properties["angle"].value<int>();
             const std::string side = properties["side"].value<std::string>();
-            int left_phys = ToPhysical(left_);
-            int right_phys = ToPhysical(right_);
+            int left_phys = ToPhysical(left_, true);
+            int right_phys = ToPhysical(right_, false);
             if (side == "left") {
                 left_phys = angle;
             } else if (side == "right") {
@@ -371,6 +395,8 @@ void HeadController::RegisterTools() {
             mount_ = next;
             zero_ = DefaultZero();
             dir_ = kDirNormal;
+            left_dir_ = kArmDirLeft;
+            right_dir_ = kArmDirRight;
             SaveMount(mount_);
             Enqueue(Action::kSync);
             ESP_LOGI(TAG, "mount -> %s, zero=%d", mode.c_str(), zero_);
@@ -426,5 +452,35 @@ void HeadController::RegisterTools() {
             Enqueue(Action::kSync);
             ESP_LOGI(TAG, "dir -> %+d (sign %+d)", dir_, LiftSign());
             return std::string("Lift direction ") + (dir_ < 0 ? "flipped." : "normal.");
+        });
+
+    // The two servos are mounted mirrored, so one arm can end up running the
+    // opposite way from the other. This flips a single arm without touching the
+    // hang pose or the other side.
+    mcp_server.AddTool(
+        "self.arm.flip",
+        "单独反转某一只手臂的上下方向（复位位不变）。side 取 left/right/both。"
+        "设置存入 NVS，重启后保留。Flip one arm's up/down direction on its own.",
+        PropertyList({
+            Property("side", kPropertyTypeString, std::string("left")),
+        }),
+        [this](const PropertyList& properties) -> ReturnValue {
+            const std::string side = properties["side"].value<std::string>();
+            if (side == "left") {
+                left_dir_ = -left_dir_;
+            } else if (side == "right") {
+                right_dir_ = -right_dir_;
+            } else if (side == "both") {
+                left_dir_ = -left_dir_;
+                right_dir_ = -right_dir_;
+            } else {
+                return std::string("side must be left, right or both.");
+            }
+            SaveArmDirs();
+            Enqueue(Action::kSync);
+            ESP_LOGI(TAG, "flip %s -> left %+d, right %+d", side.c_str(), CombinedSign(true),
+                     CombinedSign(false));
+            return std::string("Arm direction flipped: left ") + (left_dir_ < 0 ? "-" : "+") +
+                   ", right " + (right_dir_ < 0 ? "-" : "+") + ".";
         });
 }
