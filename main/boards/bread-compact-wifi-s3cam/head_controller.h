@@ -91,12 +91,21 @@ private:
     static constexpr int kZeroFront = 110;  // front mount: 70 deg short of 180
     static constexpr int kZeroBack = 0;
 
+    // Lift direction, kept separate from the mount on purpose. Which way is
+    // "forward" and which way is "back" depends on how the arm ended up on the
+    // shaft, and that can only be judged by eye once the thing is assembled, so
+    // the direction is a runtime knob (self.arm.dir, saved in NVS) rather than a
+    // constant that needs a rebuild.
+    static constexpr int kDirNormal = 1;
+    static constexpr int kDirFlipped = -1;
+
     int mount_ = kMountFront;
     int zero_ = kZeroFront;
+    int dir_ = kDirNormal;
 
     int DefaultZero() const { return mount_ == kMountFront ? kZeroFront : kZeroBack; }
     int ArmDownPhys() const { return zero_; }
-    int LiftSign() const { return mount_ == kMountFront ? -1 : 1; }
+    int LiftSign() const { return (mount_ == kMountFront ? -1 : 1) * dir_; }
 
     // Lift angles (relative to hanging down).
     static constexpr int kArmDown = 0;      // hanging down, natural pose
@@ -128,6 +137,7 @@ private:
     void LoadMount();
     void SaveMount(int mount);
     void SaveZero(int zero);
+    void SaveDir(int dir);
     void RampTo(int left_target, int right_target, int step_deg, int step_ms);
     void Dance(int count);
     void Wave(int count);

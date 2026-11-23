@@ -25,8 +25,8 @@ HeadController::HeadController(uart_port_t uart_num, gpio_num_t tx_pin) : uart_n
     ESP_LOGI(TAG, "arm link ready: TX=GPIO%d @115200 8N1", (int)tx_pin);
 
     LoadMount();
-    ESP_LOGI(TAG, "mounting %s (hang=%d deg)", mount_ == kMountFront ? "front" : "back",
-             ArmDownPhys());
+    ESP_LOGI(TAG, "mounting %s (hang=%d deg, lift sign %+d)",
+             mount_ == kMountFront ? "front" : "back", ArmDownPhys(), LiftSign());
 
     queue_ = xQueueCreate(8, sizeof(Command));
     if (queue_ == nullptr) {
@@ -90,17 +90,24 @@ void HeadController::LoadMount() {
     mount_ = (stored == kMountBack) ? kMountBack : kMountFront;
     zero_ = std::clamp(static_cast<int>(settings.GetInt("zero", DefaultZero())), kAngleMin,
                        kAngleMax);
+    dir_ = (settings.GetInt("dir", kDirNormal) < 0) ? kDirFlipped : kDirNormal;
 }
 
 void HeadController::SaveMount(int mount) {
     Settings settings("arm", true);
     settings.SetInt("mount", mount);
     settings.SetInt("zero", zero_);
+    settings.SetInt("dir", dir_);
 }
 
 void HeadController::SaveZero(int zero) {
     Settings settings("arm", true);
     settings.SetInt("zero", zero);
+}
+
+void HeadController::SaveDir(int dir) {
+    Settings settings("arm", true);
+    settings.SetInt("dir", dir);
 }
 
 void HeadController::SendAngles() {
@@ -363,6 +370,7 @@ void HeadController::RegisterTools() {
             }
             mount_ = next;
             zero_ = DefaultZero();
+            dir_ = kDirNormal;
             SaveMount(mount_);
             Enqueue(Action::kSync);
             ESP_LOGI(TAG, "mount -> %s, zero=%d", mode.c_str(), zero_);
@@ -399,5 +407,24 @@ void HeadController::RegisterTools() {
             Enqueue(Action::kSync);
             ESP_LOGI(TAG, "zero -> %d", zero_);
             return std::string("Hang pose at ") + std::to_string(zero_) + " deg.";
+        });
+
+    // Which way round "lift" runs. Kept apart from the hang pose so the two can
+    // be fixed independently: set zero until the arms hang right, then flip this
+    // once if "raise" still swings them backwards instead of forwards.
+    mcp_server.AddTool(
+        "self.arm.dir",
+        "反转举起方向，复位位不变。dir=1 正常、dir=-1 反向；不传则直接取反。"
+        "设置存入 NVS，重启后保留。Flip which way \"raise\" swings the arms.",
+        PropertyList({
+            Property("dir", kPropertyTypeInteger, 0, -1, 1),
+        }),
+        [this](const PropertyList& properties) -> ReturnValue {
+            const int requested = properties["dir"].value<int>();
+            dir_ = (requested == 0) ? -dir_ : (requested < 0 ? kDirFlipped : kDirNormal);
+            SaveDir(dir_);
+            Enqueue(Action::kSync);
+            ESP_LOGI(TAG, "dir -> %+d (sign %+d)", dir_, LiftSign());
+            return std::string("Lift direction ") + (dir_ < 0 ? "flipped." : "normal.");
         });
 }
