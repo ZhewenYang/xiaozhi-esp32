@@ -88,7 +88,8 @@ void HeadController::LoadMount() {
     Settings settings("arm");
     const int stored = settings.GetInt("mount", kMountFront);
     mount_ = (stored == kMountBack) ? kMountBack : kMountFront;
-    zero_ = std::clamp(settings.GetInt("zero", DefaultZero()), kAngleMin, kAngleMax);
+    zero_ = std::clamp(static_cast<int>(settings.GetInt("zero", DefaultZero())), kAngleMin,
+                       kAngleMax);
 }
 
 void HeadController::SaveMount(int mount) {
