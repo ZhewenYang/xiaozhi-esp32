@@ -49,7 +49,7 @@ HeadController::HeadController(uart_port_t uart_num, gpio_num_t tx_pin) : uart_n
 
 void HeadController::WaveOnWake() {
     ESP_LOGI(TAG, "wave on wake");
-    if (!Enqueue(Action::kWave, kArmDown, kArmDown, 3)) {
+    if (!Enqueue(Action::kWaveRight, kArmDown, kArmDown, 3)) {
         ESP_LOGW(TAG, "wave dropped, queue full");
     }
 }
@@ -215,14 +215,26 @@ void HeadController::Dance(int count) {
     RampTo(kArmDown, kArmDown, kSlowStepDeg, kSlowStepMs);
 }
 
-// "Hello": lift the right arm, wave it count times, drop it again.
-void HeadController::Wave(int count) {
-    RampTo(left_, kWaveHigh, kWaveStepDeg, kWaveStepMs);
-    for (int i = 0; i < count; ++i) {
-        RampTo(left_, kWaveLow, kWaveStepDeg, kWaveStepMs);
-        RampTo(left_, kWaveHigh, kWaveStepDeg, kWaveStepMs);
+// "Hello": lift one arm, wave it count times, drop it again. The other arm keeps
+// whatever pose it already had. Lift values are mirrored by the per-arm mapping,
+// so passing the same numbers makes the left arm wave symmetrically to the right.
+void HeadController::Wave(int count, bool left) {
+    const int other = left ? right_ : left_;
+    if (left) {
+        RampTo(kWaveHigh, other, kWaveStepDeg, kWaveStepMs);
+        for (int i = 0; i < count; ++i) {
+            RampTo(kWaveLow, other, kWaveStepDeg, kWaveStepMs);
+            RampTo(kWaveHigh, other, kWaveStepDeg, kWaveStepMs);
+        }
+        RampTo(kArmDown, other, kWaveStepDeg, kWaveStepMs);
+    } else {
+        RampTo(other, kWaveHigh, kWaveStepDeg, kWaveStepMs);
+        for (int i = 0; i < count; ++i) {
+            RampTo(other, kWaveLow, kWaveStepDeg, kWaveStepMs);
+            RampTo(other, kWaveHigh, kWaveStepDeg, kWaveStepMs);
+        }
+        RampTo(other, kArmDown, kWaveStepDeg, kWaveStepMs);
     }
-    RampTo(left_, kArmDown, kWaveStepDeg, kWaveStepMs);
 }
 
 void HeadController::Execute(const Command& cmd) {
@@ -259,8 +271,12 @@ void HeadController::Execute(const Command& cmd) {
             Dance(cmd.count);
             break;
 
-        case Action::kWave:
-            Wave(cmd.count);
+        case Action::kWaveLeft:
+            Wave(cmd.count, true);
+            break;
+
+        case Action::kWaveRight:
+            Wave(cmd.count, false);
             break;
 
         case Action::kSet:  // cmd.pan/tilt carry raw servo angles
@@ -336,6 +352,38 @@ void HeadController::RegisterTools() {
             }
             ESP_LOGI(TAG, "dance count=%d", count);
             return std::string("Dancing.");
+        });
+
+    mcp_server.AddTool(
+        "self.arm.wave_left",
+        "左手（左臂）挥手打招呼：抬手 → 左右挥动 count 次 → 放下。另一只手保持不动。"
+        "count 默认 3。Wave the left arm hello count times, then put it down.",
+        PropertyList({
+            Property("count", kPropertyTypeInteger, 3, 1, 10),
+        }),
+        [this](const PropertyList& properties) -> ReturnValue {
+            const int count = properties["count"].value<int>();
+            if (!Enqueue(Action::kWaveLeft, kArmDown, kArmDown, count)) {
+                return std::string("Arm is busy, command dropped.");
+            }
+            ESP_LOGI(TAG, "wave left count=%d", count);
+            return std::string("Waving with the left arm.");
+        });
+
+    mcp_server.AddTool(
+        "self.arm.wave_right",
+        "右手（右臂）挥手打招呼：抬手 → 左右挥动 count 次 → 放下。另一只手保持不动。"
+        "count 默认 3。Wave the right arm hello count times, then put it down.",
+        PropertyList({
+            Property("count", kPropertyTypeInteger, 3, 1, 10),
+        }),
+        [this](const PropertyList& properties) -> ReturnValue {
+            const int count = properties["count"].value<int>();
+            if (!Enqueue(Action::kWaveRight, kArmDown, kArmDown, count)) {
+                return std::string("Arm is busy, command dropped.");
+            }
+            ESP_LOGI(TAG, "wave right count=%d", count);
+            return std::string("Waving with the right arm.");
         });
 
     mcp_server.AddTool(

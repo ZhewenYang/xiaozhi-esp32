@@ -47,7 +47,8 @@ private:
         kRaiseRight,
         kLowerRight,
         kDance,       // arms alternate up/down N times, then home
-        kWave,        // raise right arm, wave N times, then home
+        kWaveLeft,    // raise left arm, wave N times, then home
+        kWaveRight,   // raise right arm, wave N times, then home
         kSet,         // direct servo angles, for bench calibration
         kSync,        // re-send the hanging pose after a mounting change
     };
@@ -157,7 +158,7 @@ private:
     void SaveLeftZero(int zero);
     void RampTo(int left_target, int right_target, int step_deg, int step_ms);
     void Dance(int count);
-    void Wave(int count);
+    void Wave(int count, bool left);
     void Execute(const Command& cmd);
     static void TaskEntry(void* arg);
     void Run();
